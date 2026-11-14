@@ -35,7 +35,8 @@ int tone_latency(void);
 float tone_gr_db(Tone *t);
 
 /* ------------------------------------------------------------ MOD */
-enum { MO_TRIPLE, MO_BARBER, MO_SPIRAL, MO_CHOIR, MO_DRIFT, MO_ORBIT, MO_LIQUID, MO_TIDE, MO_N };
+enum { MO_TRIPLE, MO_BARBER, MO_SPIRAL, MO_CHOIR, MO_DRIFT, MO_ORBIT, MO_LIQUID, MO_TIDE, MO_STRINGS, MO_N };
+#define STR_BANDS 40
 #define BARBER_VOICES 3
 #define BARBER_STAGES 12
 #define DRIFT_VOICES 6
@@ -75,6 +76,9 @@ typedef struct {
     float vz[2][4], vlamp[2], vph, vfb[2], vwarm[2], vco[2][4];
     /* tide (dynamic harmonic tremolo) */
     float tph, tenv, tlo[2], tlo2[2];
+    /* strings (Haible's 40-band string filter) */
+    Svf sb[STR_BANDS];
+    float sg[STR_BANDS], sgain[STR_BANDS], sfbk[2], svac, sscan;
 } Modu;
 int modu_init(Modu *m);
 void modu_free(Modu *m);

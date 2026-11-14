@@ -100,6 +100,7 @@ Each runs a look-ahead limiter, and FILTER / CRUSH come from its crush page.
 | ORBIT | **SPEED, RADIUS, SHAPE, SATELLITE**, DISTANCE, WIDTH, WOBBLE | the sound circles you, with Doppler, distance and a counter-rotating satellite |
 | LIQUID | **SPEED, INTENSITY, THROB, VIBRATO**, CENTRE, FEEDBACK, STEREO, WARMTH | a photocell vibe whose lamp glows and fades unevenly |
 | TIDE | **RATE, DEPTH, ENV>RATE, HARMONIC**, CROSSOVER, SHAPE, PAN, ENV>DEPTH | a harmonic tremolo that speeds up (or deepens) as you play harder |
+| STRINGS | **Q, FEEDBACK, SPECTRUM, SCAN**, SCAN RATE, STEREO, WARP, VACTROL | Jürgen Haible's String Filter: 40 fixed band-passes (below) |
 
 **TRIPLE** follows the PS-3100 / 3200 resonators:
 - Three resonant band-passes in parallel. Each resonator's resonance is held back by a soft,
@@ -112,6 +113,18 @@ Each runs a look-ahead limiter, and FILTER / CRUSH come from its crush page.
   - Positive: the pan follows the sweep.
   - Negative: the pan moves against the sweep.
 - LFO shapes: sine, triangle, square, sample-and-hold, drift.
+
+**STRINGS** follows the board files of Jürgen Haible's String Filter:
+- **40 fixed band-passes** at the two boards' printed centre frequencies, interleaved: 43.5, 50.4,
+  58.4, 67.8 … 11980, 13890 Hz. That is one band every ~2.6 semitones.
+- **Odd bands go to one side and even bands to the other**, as the two boards come out separately.
+  STEREO sets how far apart the sides are.
+- **One Q for the whole bank**, as the LM394-controlled Q_CV sets it on the board.
+- **FEEDBACK** runs round the bank (the board's Feed input), held by a **vactrol-like limiter**
+  (the VTL5C3): quick to grab, slow to let go.
+- Two additions that aren't on the board:
+  - **SCAN** moves a formant window across the bands.
+  - **WARP** scales all forty frequencies together.
 
 ### DELAY
 
@@ -199,7 +212,8 @@ TrimFX is GPL-3.0-or-later (`LICENSE`). It builds on:
 - **ClassicReverb RE-04** (AnClark, GPL-3): CLASSIC uses its reverse-engineered structure and
   constants (Kjaerhus Classic Reverb).
 - **Ideas, not code**:
-  - Jürgen Haible's PolyKorg / PS-3200 material and the PS-3200 voice card schematic (TRIPLE).
+  - Jürgen Haible's PolyKorg / PS-3200 material and the PS-3200 voice card schematic (TRIPLE), and
+    his String Filter board files (STRINGS: the forty centre frequencies and the structure).
   - MAI_verb and HybridReverb2 (the hybrid early + FDN chamber).
   - Dattorro's published plate topology (CONCERT / PLATE / HALO).
   - Valhalla VintageVerb's idea of a "color" era control.

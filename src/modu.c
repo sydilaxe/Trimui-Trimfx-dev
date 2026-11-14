@@ -17,7 +17,12 @@
  *               fades unevenly (the throb), chorus or vibrato
  *   TIDE        a harmonic tremolo that follows your playing: lows and highs
  *               pulse against each other and pan, faster (or deeper) as you
- *               play harder */
+ *               play harder
+ *   STRINGS     Juergen Haible's String Filter: forty fixed band-passes, one
+ *               every ~2.6 semitones from 43 Hz to 14 kHz (the two boards'
+ *               centre frequencies), odd bands left and even right, one Q for
+ *               all, feedback round the bank held by a vactrol-like limiter,
+ *               and a formant window scanning across the bands */
 #include <stdio.h>
 
 #include "modules.h"
@@ -405,6 +410,56 @@ static void tide(Modu *m, const float *p, float *l, float *r, int n)
     }
 }
 
+/* ---------------------------------------------------------------- STRINGS */
+/* the centre frequencies printed on the two String Filter boards, merged in order:
+ * PCB 2's bands fall between PCB 1's */
+static const float SBF[STR_BANDS] = {
+    43.5f, 50.4f, 58.4f, 67.8f, 78.5f, 91.1f, 106, 122, 142, 165, 191, 221, 256, 297, 345, 400, 463, 537, 623, 722,
+    837, 970, 1130, 1300, 1510, 1750, 2030, 2360, 2730, 3170, 3670, 4260, 4930, 5720, 6630, 7690, 8914, 10340, 11980, 13890};
+
+static void strings(Modu *m, const float *p, float *l, float *r, int n)
+{
+    float Q = expmap(p[0], 2.f, 80.f), k = 1.f / Q, fb = p[1] * 0.97f, tilt = p[2] * 2.f - 1.f, scan = p[3];
+    float rate = expmap(p[4], 0.02f, 3.f), stereo = p[5], warp = expmap(p[6], 0.5f, 2.f), vac = p[7];
+    float norm = 3.6f / sqrtf(4.f + Q * 0.35f);
+    /* coefficients: once a block (the bands do not move fast) */
+    m->sscan += rate * (float)n / TFX_SR;
+    m->sscan -= floorf(m->sscan);
+    float centre = 0.5f + 0.45f * lfo_sin(m->sscan); /* where the scanning window sits, 0..1 across the bank */
+    for (int b = 0; b < STR_BANDS; b++) {
+        float f = SBF[b] * warp;
+        m->sg[b] = f < 0.45f * TFX_SR ? svf_g(f) : 0.f;
+        float pos = (float)b / (STR_BANDS - 1);
+        float tl = exp2f(tilt * 2.5f * (pos - 0.5f) * 2.f);          /* +-5 dB across the bank, per side */
+        float d = (pos - centre) * 5.f;
+        float win = lerpf(1.f, 0.15f + 1.6f * expf(-d * d), scan);    /* SCAN: a formant window over the bands */
+        m->sgain[b] = f < 0.45f * TFX_SR ? tl * win * norm : 0.f;
+    }
+    /* the vactrol: quick to light, slow to go dark (VTL5C3-like), more of it as VACTROL rises */
+    float att = 0.004f, rel = 0.00012f + 0.0004f * (1.f - vac), thr = 0.6f - 0.45f * vac;
+    for (int i = 0; i < n; i++) {
+        float in = 0.5f * (l[i] + r[i]);
+        float lim = 1.f / (1.f + fmaxf(0.f, m->svac - thr) * 6.f);
+        float x = in + fb * lim * 0.5f * (m->sfbk[0] + m->sfbk[1]);
+        float ol = 0.f, orr = 0.f;
+        for (int b = 0; b < STR_BANDS; b++) {
+            if (m->sg[b] == 0.f) continue;
+            float y = k * svf_run(&m->sb[b], x, m->sg[b], k).bp * m->sgain[b];
+            /* odd bands to one side, even to the other: PCB 1 / PCB 2 */
+            float side = (b & 1) ? 1.f : -1.f;
+            ol += y * (1.f - stereo * side * 0.9f);
+            orr += y * (1.f + stereo * side * 0.9f);
+        }
+        ol = softclip(ol);
+        orr = softclip(orr);
+        m->sfbk[0] = ol; m->sfbk[1] = orr;
+        float e = fmaxf(fabsf(ol), fabsf(orr));
+        m->svac += (e - m->svac) * (e > m->svac ? att : rel);
+        l[i] = ol;
+        r[i] = orr;
+    }
+}
+
 void modu_process(Modu *m, int algo, const float *p, const float *raw, const Patch *pt, float *l, float *r, int n)
 {
     (void)pt;
@@ -416,7 +471,8 @@ void modu_process(Modu *m, int algo, const float *p, const float *raw, const Pat
     case MO_DRIFT: drift(m, p, raw, l, r, n); break;
     case MO_ORBIT: orbit(m, p, l, r, n); break;
     case MO_LIQUID: liquid(m, p, l, r, n); break;
-    default: tide(m, p, l, r, n); break;
+    case MO_TIDE: tide(m, p, l, r, n); break;
+    default: strings(m, p, l, r, n); break;
     }
 }
 
@@ -468,6 +524,12 @@ static void fmt(int algo, int p, float v, const Patch *pt, char *o, int n)
         if (p == 3) { snprintf(o, n, v < 0.05f ? "CHORUS" : v > 0.95f ? "VIBRATO" : "%.0f%% VIB", v * 100.f); return; }
         if (p == 4) { snprintf(o, n, "%.0f Hz", expmap(v, 150.f, 1200.f)); return; }
         break;
+    case MO_STRINGS:
+        if (p == 0) { snprintf(o, n, "Q %.1f", expmap(v, 2.f, 80.f)); return; }
+        if (p == 2) { snprintf(o, n, "%+.0f", s * 100.f); return; }
+        if (p == 4) { snprintf(o, n, "%.2f Hz", expmap(v, 0.02f, 3.f)); return; }
+        if (p == 6) { snprintf(o, n, "x%.2f", expmap(v, 0.5f, 2.f)); return; }
+        break;
     case MO_TIDE:
         if (p == 0) { snprintf(o, n, "%.2f Hz", expmap(v, 0.1f, 12.f)); return; }
         if (p == 2 || p == 7) { snprintf(o, n, "%+.0f %%", s * 100.f); return; }
@@ -480,7 +542,7 @@ static void fmt(int algo, int p, float v, const Patch *pt, char *o, int n)
 const ModInfo modu_info = {
     "MOD",
     MO_N,
-    {"TRIPLE", "BARBERPOLE", "SPIRAL", "CHOIR", "DRIFT", "ORBIT", "LIQUID", "TIDE"},
+    {"TRIPLE", "BARBERPOLE", "SPIRAL", "CHOIR", "DRIFT", "ORBIT", "LIQUID", "TIDE", "STRINGS"},
     {"three resonant filters, LFO-swept and panned (PS-3100)",
      "endless phaser: notches rise or fall forever",
      "frequency shifter in a feedback loop: spiralling repeats",
@@ -488,7 +550,8 @@ const ModInfo modu_info = {
      "six wandering tape voices: an organic ensemble",
      "the sound circles you: Doppler, distance, a satellite",
      "photocell vibe: an uneven lamp, chorus or vibrato",
-     "harmonic tremolo that speeds up as you play harder"},
+     "harmonic tremolo that speeds up as you play harder",
+     "Haible String Filter: 40 bands, odd L / even R, fed back"},
     {
         {"FREQ 1", "FREQ 2", "FREQ 3", "RESO", "LFO RATE", "LFO DEPTH", "PAN LINK", "LFO SHAPE"},
         {"SPEED", "RESO", "DEPTH", "STEREO", "STAGES", "CENTRE", "DRIFT", "NOTCH"},
@@ -498,6 +561,7 @@ const ModInfo modu_info = {
         {"SPEED", "RADIUS", "SHAPE", "SATELLITE", "DISTANCE", "WIDTH", "WOBBLE", ""},
         {"SPEED", "INTENSITY", "THROB", "VIBRATO", "CENTRE", "FEEDBACK", "STEREO", "WARMTH"},
         {"RATE", "DEPTH", "ENV>RATE", "HARMONIC", "CROSSOVER", "SHAPE", "PAN", "ENV>DEPTH"},
+        {"Q", "FEEDBACK", "SPECTRUM", "SCAN", "SCAN RATE", "STEREO", "WARP", "VACTROL"},
     },
     {
         {0.25f, 0.5f, 0.72f, 0.55f, 0.3f, 0.35f, 0.8f, 0.f},
@@ -508,6 +572,7 @@ const ModInfo modu_info = {
         {0.62f, 0.5f, 0.6f, 0.3f, 0.5f, 0.6f, 0.2f, 0.f},
         {0.35f, 0.6f, 0.5f, 0.f, 0.5f, 0.2f, 0.3f, 0.3f},
         {0.4f, 0.6f, 0.75f, 1.f, 0.4f, 0.2f, 0.6f, 0.5f},
+        {0.55f, 0.35f, 0.5f, 0.3f, 0.25f, 0.85f, 0.5f, 0.5f},
     },
     0.6f,
     fmt,
