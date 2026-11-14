@@ -16,7 +16,7 @@ NAME     := TrimFX
 SDL_INC  := third_party/SDL2-2.30.9-headers
 VERSION  ?= $(shell sed -n 's/^\#define TFX_VERSION "\([^"]*\)".*/\1/p' src/main.c)
 DSP      := src/engine.c src/tone.c src/modu.c src/delay.c src/verb.c src/bloom.c src/midiverb2.c src/master/master.c
-SRC      := src/main.c $(DSP) src/brick_input.c src/perflog.c src/ringleds.c src/gfx.c
+SRC      := src/main.c $(DSP) src/brick_input.c src/perflog.c src/ringleds.c src/gfx.c src/midi.c
 HDR      := $(wildcard src/*.h src/master/*.h)
 CFLAGS   ?= -O2
 CFLAGS   += -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Wno-format-truncation \

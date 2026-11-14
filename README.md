@@ -76,22 +76,34 @@ from MASTER > SETUP or STICKS, or with HOME on the Brick Pro.
 
 | Button | Action |
 |---|---|
-| L1 / R1 | Previous / next pedal (then MASTER). In an overlay: switch between SETUP and STICKS |
+| F1 / F2 | Previous / next pedal (then MASTER), so the shoulder buttons are never needed. In an overlay: switch between SETUP and STICKS |
+| L1 / R1 | The same as F1 / F2 |
 | D-pad ↑↓ | Choose a control on the pedal: ALGORITHM, the 4 knobs, the 4 sliders, MIX |
 | D-pad ←→ | Turn it (hold to speed up). On ALGORITHM: change the algorithm |
 | A | The pedal's footswitch (bypass). On MASTER rows: open SETUP / STICKS, save to the slot |
 | B | Sticks: FOCUS ↔ MATRIX (in an overlay: close it) |
 | X | Sticks: SPRING ↔ LATCH |
 | Y | HOLD the sticks |
-| L2 / R2 | Previous / next algorithm of the selected pedal |
+| L2 / R2 | Previous / next algorithm of the selected pedal (or choose ALGORITHM and use ←→) |
 | L3 / R3 | FREEZE the delay / the reverb |
 | SELECT | Tap tempo (RHYTHM, STUTTER) |
 | START | Save to the current preset slot |
-| F1 / F2 | Previous / next preset slot (an empty slot loads a factory preset) |
 | HOME | Open / close SETUP (Brick Pro) |
 | MENU | Quit (the state is saved and comes back next time) |
 
 ![The STICKS overlay: the matrix and the sticks](docs/screen-sticks.png)
+
+## MIDI control (Korg nanoKONTROL Studio)
+
+Plug a USB MIDI controller in (through a hub, with the audio interface) and it is picked up within two
+seconds. The **TRIMFX template** for the Korg nanoKONTROL Studio puts 36 controls on hardware: the
+8 knobs are the eight parameters of a box, the 8 faders are the four MIXes, IN, DRY, OUT and TEMPO,
+and the buttons are the footswitches, freezes, algorithm steps, pages, presets, tap and save.
+Scene 1 follows the page on screen; scenes 2-5 are TONE, MOD, DELAY and REVERB, so all 32 parameters
+are a scene change away. Anything else can be mapped with **SETUP > MIDI LEARN**: choose a
+control on the board, move a MIDI one. See [docs/midi.md](docs/midi.md).
+
+![The TRIMFX template](docs/midi-template.svg)
 
 ## The modules
 
@@ -185,7 +197,7 @@ converters' era: 70s (narrow band, few bits), 80s, 90s, then NOW (full band).
 ## Presets
 
 - **START** saves to the current slot (1-16) as `presets/slotNN.txt`, in plain text.
-- **F1 / F2** step through the slots. An empty slot plays one of the 8 factory presets: DREAM SEND,
+- **MASTER > SLOT** (←→) or a MIDI controller's MARKER < > steps through the slots. An empty slot plays one of the 8 factory presets: DREAM SEND,
   ASCENSION, PS RITUAL, DUST TAPE, BLOOM CATHEDRAL, STATION CHANT, FULL WET CLOUD and MIRROR WORLD.
 - The whole state, including the stick matrix, is kept in `state.txt` and comes back at the next
   start.

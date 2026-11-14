@@ -1,0 +1,203 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 560" font-family="Helvetica,Arial,sans-serif">
+<rect width="1180" height="560" rx="14" fill="#1b1c1f"/>
+<text x="24" y="38" fill="#e9eaeb" font-size="22" font-weight="bold" letter-spacing="3">TRIMFX</text>
+<text x="140" y="38" fill="#ff9a1f" font-size="14">nanoKONTROL Studio template - scene 1 = ch 1 knobs follow the page; scenes 2-5 = ch 2-5 knobs = TONE / MOD / DELAY / REVERB</text>
+<circle cx="69" cy="92" r="26" fill="#0d0e10" stroke="#555"/>
+<text x="69" y="97" fill="#ff9a1f" font-size="15" text-anchor="middle" font-weight="bold">P1</text>
+<text x="69" y="134" fill="#9a9ca0" font-size="10" text-anchor="middle">CC 21</text>
+<rect x="30" y="146" width="78" height="34" rx="5" fill="#d9dadb"/>
+<text x="69" y="161" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">TONE ON</text>
+<text x="69" y="174" fill="#333" font-size="10" text-anchor="middle">CC 41</text>
+<rect x="30" y="186" width="78" height="34" rx="5" fill="#d9dadb"/>
+<text x="69" y="201" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">TONE ALG-</text>
+<text x="69" y="214" fill="#333" font-size="10" text-anchor="middle">CC 51</text>
+<rect x="30" y="226" width="78" height="34" rx="5" fill="#d9dadb"/>
+<text x="69" y="241" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">TONE ALG+</text>
+<text x="69" y="254" fill="#333" font-size="10" text-anchor="middle">CC 61</text>
+<rect x="30" y="266" width="78" height="34" rx="5" fill="#ffcf8a"/>
+<text x="69" y="281" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">PG TONE</text>
+<text x="69" y="294" fill="#333" font-size="10" text-anchor="middle">CC 71</text>
+<rect x="63" y="316" width="12" height="170" rx="4" fill="#0d0e10"/>
+<rect x="51" y="380" width="36" height="22" rx="3" fill="#c4c6c7"/>
+<text x="69" y="506" fill="#e9eaeb" font-size="12" text-anchor="middle" font-weight="bold">TONE MIX</text>
+<text x="69" y="522" fill="#9a9ca0" font-size="10" text-anchor="middle">CC 31</text>
+<circle cx="161" cy="92" r="26" fill="#0d0e10" stroke="#555"/>
+<text x="161" y="97" fill="#ff9a1f" font-size="15" text-anchor="middle" font-weight="bold">P2</text>
+<text x="161" y="134" fill="#9a9ca0" font-size="10" text-anchor="middle">CC 22</text>
+<rect x="122" y="146" width="78" height="34" rx="5" fill="#d9dadb"/>
+<text x="161" y="161" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">MOD ON</text>
+<text x="161" y="174" fill="#333" font-size="10" text-anchor="middle">CC 42</text>
+<rect x="122" y="186" width="78" height="34" rx="5" fill="#d9dadb"/>
+<text x="161" y="201" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">MOD ALG-</text>
+<text x="161" y="214" fill="#333" font-size="10" text-anchor="middle">CC 52</text>
+<rect x="122" y="226" width="78" height="34" rx="5" fill="#d9dadb"/>
+<text x="161" y="241" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">MOD ALG+</text>
+<text x="161" y="254" fill="#333" font-size="10" text-anchor="middle">CC 62</text>
+<rect x="122" y="266" width="78" height="34" rx="5" fill="#ffcf8a"/>
+<text x="161" y="281" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">PG MOD</text>
+<text x="161" y="294" fill="#333" font-size="10" text-anchor="middle">CC 72</text>
+<rect x="155" y="316" width="12" height="170" rx="4" fill="#0d0e10"/>
+<rect x="143" y="380" width="36" height="22" rx="3" fill="#c4c6c7"/>
+<text x="161" y="506" fill="#e9eaeb" font-size="12" text-anchor="middle" font-weight="bold">MOD MIX</text>
+<text x="161" y="522" fill="#9a9ca0" font-size="10" text-anchor="middle">CC 32</text>
+<circle cx="253" cy="92" r="26" fill="#0d0e10" stroke="#555"/>
+<text x="253" y="97" fill="#ff9a1f" font-size="15" text-anchor="middle" font-weight="bold">P3</text>
+<text x="253" y="134" fill="#9a9ca0" font-size="10" text-anchor="middle">CC 23</text>
+<rect x="214" y="146" width="78" height="34" rx="5" fill="#d9dadb"/>
+<text x="253" y="161" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">DLY ON</text>
+<text x="253" y="174" fill="#333" font-size="10" text-anchor="middle">CC 43</text>
+<rect x="214" y="186" width="78" height="34" rx="5" fill="#d9dadb"/>
+<text x="253" y="201" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">DLY ALG-</text>
+<text x="253" y="214" fill="#333" font-size="10" text-anchor="middle">CC 53</text>
+<rect x="214" y="226" width="78" height="34" rx="5" fill="#d9dadb"/>
+<text x="253" y="241" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">DLY ALG+</text>
+<text x="253" y="254" fill="#333" font-size="10" text-anchor="middle">CC 63</text>
+<rect x="214" y="266" width="78" height="34" rx="5" fill="#ffcf8a"/>
+<text x="253" y="281" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">PG DLY</text>
+<text x="253" y="294" fill="#333" font-size="10" text-anchor="middle">CC 73</text>
+<rect x="247" y="316" width="12" height="170" rx="4" fill="#0d0e10"/>
+<rect x="235" y="380" width="36" height="22" rx="3" fill="#c4c6c7"/>
+<text x="253" y="506" fill="#e9eaeb" font-size="12" text-anchor="middle" font-weight="bold">DLY MIX</text>
+<text x="253" y="522" fill="#9a9ca0" font-size="10" text-anchor="middle">CC 33</text>
+<circle cx="345" cy="92" r="26" fill="#0d0e10" stroke="#555"/>
+<text x="345" y="97" fill="#ff9a1f" font-size="15" text-anchor="middle" font-weight="bold">P4</text>
+<text x="345" y="134" fill="#9a9ca0" font-size="10" text-anchor="middle">CC 24</text>
+<rect x="306" y="146" width="78" height="34" rx="5" fill="#d9dadb"/>
+<text x="345" y="161" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">VERB ON</text>
+<text x="345" y="174" fill="#333" font-size="10" text-anchor="middle">CC 44</text>
+<rect x="306" y="186" width="78" height="34" rx="5" fill="#d9dadb"/>
+<text x="345" y="201" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">VERB ALG-</text>
+<text x="345" y="214" fill="#333" font-size="10" text-anchor="middle">CC 54</text>
+<rect x="306" y="226" width="78" height="34" rx="5" fill="#d9dadb"/>
+<text x="345" y="241" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">VERB ALG+</text>
+<text x="345" y="254" fill="#333" font-size="10" text-anchor="middle">CC 64</text>
+<rect x="306" y="266" width="78" height="34" rx="5" fill="#ffcf8a"/>
+<text x="345" y="281" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">PG VERB</text>
+<text x="345" y="294" fill="#333" font-size="10" text-anchor="middle">CC 74</text>
+<rect x="339" y="316" width="12" height="170" rx="4" fill="#0d0e10"/>
+<rect x="327" y="380" width="36" height="22" rx="3" fill="#c4c6c7"/>
+<text x="345" y="506" fill="#e9eaeb" font-size="12" text-anchor="middle" font-weight="bold">VERB MIX</text>
+<text x="345" y="522" fill="#9a9ca0" font-size="10" text-anchor="middle">CC 34</text>
+<circle cx="437" cy="92" r="26" fill="#0d0e10" stroke="#555"/>
+<text x="437" y="97" fill="#ff9a1f" font-size="15" text-anchor="middle" font-weight="bold">P5</text>
+<text x="437" y="134" fill="#9a9ca0" font-size="10" text-anchor="middle">CC 25</text>
+<rect x="398" y="146" width="78" height="34" rx="5" fill="#d9dadb"/>
+<text x="437" y="161" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">FRZ DLY</text>
+<text x="437" y="174" fill="#333" font-size="10" text-anchor="middle">CC 45</text>
+<rect x="398" y="186" width="78" height="34" rx="5" fill="#d9dadb"/>
+<text x="437" y="201" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">ORDER-</text>
+<text x="437" y="214" fill="#333" font-size="10" text-anchor="middle">CC 55</text>
+<rect x="398" y="226" width="78" height="34" rx="5" fill="#d9dadb"/>
+<text x="437" y="241" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">ORDER+</text>
+<text x="437" y="254" fill="#333" font-size="10" text-anchor="middle">CC 65</text>
+<rect x="398" y="266" width="78" height="34" rx="5" fill="#ffcf8a"/>
+<text x="437" y="281" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">PG MASTER</text>
+<text x="437" y="294" fill="#333" font-size="10" text-anchor="middle">CC 75</text>
+<rect x="431" y="316" width="12" height="170" rx="4" fill="#0d0e10"/>
+<rect x="419" y="380" width="36" height="22" rx="3" fill="#c4c6c7"/>
+<text x="437" y="506" fill="#e9eaeb" font-size="12" text-anchor="middle" font-weight="bold">IN</text>
+<text x="437" y="522" fill="#9a9ca0" font-size="10" text-anchor="middle">CC 35</text>
+<circle cx="529" cy="92" r="26" fill="#0d0e10" stroke="#555"/>
+<text x="529" y="97" fill="#ff9a1f" font-size="15" text-anchor="middle" font-weight="bold">P6</text>
+<text x="529" y="134" fill="#9a9ca0" font-size="10" text-anchor="middle">CC 26</text>
+<rect x="490" y="146" width="78" height="34" rx="5" fill="#d9dadb"/>
+<text x="529" y="161" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">FRZ VERB</text>
+<text x="529" y="174" fill="#333" font-size="10" text-anchor="middle">CC 46</text>
+<rect x="490" y="186" width="78" height="34" rx="5" fill="#d9dadb"/>
+<text x="529" y="201" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">MATRIX</text>
+<text x="529" y="214" fill="#333" font-size="10" text-anchor="middle">CC 56</text>
+<rect x="490" y="226" width="78" height="34" rx="5" fill="#77797c"/>
+<text x="529" y="241" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">-</text>
+<text x="529" y="254" fill="#333" font-size="10" text-anchor="middle">CC 66</text>
+<rect x="490" y="266" width="78" height="34" rx="5" fill="#77797c"/>
+<text x="529" y="281" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">-</text>
+<text x="529" y="294" fill="#333" font-size="10" text-anchor="middle">CC 76</text>
+<rect x="523" y="316" width="12" height="170" rx="4" fill="#0d0e10"/>
+<rect x="511" y="380" width="36" height="22" rx="3" fill="#c4c6c7"/>
+<text x="529" y="506" fill="#e9eaeb" font-size="12" text-anchor="middle" font-weight="bold">DRY</text>
+<text x="529" y="522" fill="#9a9ca0" font-size="10" text-anchor="middle">CC 36</text>
+<circle cx="621" cy="92" r="26" fill="#0d0e10" stroke="#555"/>
+<text x="621" y="97" fill="#ff9a1f" font-size="15" text-anchor="middle" font-weight="bold">P7</text>
+<text x="621" y="134" fill="#9a9ca0" font-size="10" text-anchor="middle">CC 27</text>
+<rect x="582" y="146" width="78" height="34" rx="5" fill="#d9dadb"/>
+<text x="621" y="161" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">HOLD</text>
+<text x="621" y="174" fill="#333" font-size="10" text-anchor="middle">CC 47</text>
+<rect x="582" y="186" width="78" height="34" rx="5" fill="#77797c"/>
+<text x="621" y="201" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">-</text>
+<text x="621" y="214" fill="#333" font-size="10" text-anchor="middle">CC 57</text>
+<rect x="582" y="226" width="78" height="34" rx="5" fill="#77797c"/>
+<text x="621" y="241" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">-</text>
+<text x="621" y="254" fill="#333" font-size="10" text-anchor="middle">CC 67</text>
+<rect x="582" y="266" width="78" height="34" rx="5" fill="#77797c"/>
+<text x="621" y="281" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">-</text>
+<text x="621" y="294" fill="#333" font-size="10" text-anchor="middle">CC 77</text>
+<rect x="615" y="316" width="12" height="170" rx="4" fill="#0d0e10"/>
+<rect x="603" y="380" width="36" height="22" rx="3" fill="#c4c6c7"/>
+<text x="621" y="506" fill="#e9eaeb" font-size="12" text-anchor="middle" font-weight="bold">OUT</text>
+<text x="621" y="522" fill="#9a9ca0" font-size="10" text-anchor="middle">CC 37</text>
+<circle cx="713" cy="92" r="26" fill="#0d0e10" stroke="#555"/>
+<text x="713" y="97" fill="#ff9a1f" font-size="15" text-anchor="middle" font-weight="bold">P8</text>
+<text x="713" y="134" fill="#9a9ca0" font-size="10" text-anchor="middle">CC 28</text>
+<rect x="674" y="146" width="78" height="34" rx="5" fill="#d9dadb"/>
+<text x="713" y="161" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">LATCH</text>
+<text x="713" y="174" fill="#333" font-size="10" text-anchor="middle">CC 48</text>
+<rect x="674" y="186" width="78" height="34" rx="5" fill="#77797c"/>
+<text x="713" y="201" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">-</text>
+<text x="713" y="214" fill="#333" font-size="10" text-anchor="middle">CC 58</text>
+<rect x="674" y="226" width="78" height="34" rx="5" fill="#77797c"/>
+<text x="713" y="241" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">-</text>
+<text x="713" y="254" fill="#333" font-size="10" text-anchor="middle">CC 68</text>
+<rect x="674" y="266" width="78" height="34" rx="5" fill="#77797c"/>
+<text x="713" y="281" fill="#111" font-size="11" text-anchor="middle" font-weight="bold">-</text>
+<text x="713" y="294" fill="#333" font-size="10" text-anchor="middle">CC 78</text>
+<rect x="707" y="316" width="12" height="170" rx="4" fill="#0d0e10"/>
+<rect x="695" y="380" width="36" height="22" rx="3" fill="#c4c6c7"/>
+<text x="713" y="506" fill="#e9eaeb" font-size="12" text-anchor="middle" font-weight="bold">TEMPO</text>
+<text x="713" y="522" fill="#9a9ca0" font-size="10" text-anchor="middle">CC 38</text>
+<text x="22" y="168" fill="#9a9ca0" font-size="9" text-anchor="end" transform="rotate(-90 22 168)">SOLO</text>
+<text x="22" y="208" fill="#9a9ca0" font-size="9" text-anchor="end" transform="rotate(-90 22 208)">MUTE</text>
+<text x="22" y="248" fill="#9a9ca0" font-size="9" text-anchor="end" transform="rotate(-90 22 248)">REC</text>
+<text x="22" y="288" fill="#9a9ca0" font-size="9" text-anchor="end" transform="rotate(-90 22 288)">SELECT</text>
+<rect x="790" y="70" width="116" height="60" rx="6" fill="#2a2c31" stroke="#444"/>
+<text x="848" y="88" fill="#9a9ca0" font-size="11" text-anchor="middle">TRACK &lt;  CC 81</text>
+<text x="848" y="110" fill="#ff9a1f" font-size="13" text-anchor="middle" font-weight="bold">PAGE &lt;</text>
+<rect x="918" y="70" width="116" height="60" rx="6" fill="#2a2c31" stroke="#444"/>
+<text x="976" y="88" fill="#9a9ca0" font-size="11" text-anchor="middle">TRACK &gt;  CC 82</text>
+<text x="976" y="110" fill="#ff9a1f" font-size="13" text-anchor="middle" font-weight="bold">PAGE &gt;</text>
+<rect x="1046" y="70" width="116" height="60" rx="6" fill="#2a2c31" stroke="#444"/>
+<text x="1104" y="88" fill="#9a9ca0" font-size="11" text-anchor="middle">MARKER &lt;  CC 83</text>
+<text x="1104" y="110" fill="#ff9a1f" font-size="13" text-anchor="middle" font-weight="bold">PRESET &lt;</text>
+<rect x="790" y="144" width="116" height="60" rx="6" fill="#2a2c31" stroke="#444"/>
+<text x="848" y="162" fill="#9a9ca0" font-size="11" text-anchor="middle">MARKER &gt;  CC 84</text>
+<text x="848" y="184" fill="#ff9a1f" font-size="13" text-anchor="middle" font-weight="bold">PRESET &gt;</text>
+<rect x="918" y="144" width="116" height="60" rx="6" fill="#2a2c31" stroke="#444"/>
+<text x="976" y="162" fill="#9a9ca0" font-size="11" text-anchor="middle">SET  CC 85</text>
+<text x="976" y="184" fill="#ff9a1f" font-size="13" text-anchor="middle" font-weight="bold">TAP</text>
+<rect x="1046" y="144" width="116" height="60" rx="6" fill="#2a2c31" stroke="#444"/>
+<text x="1104" y="162" fill="#9a9ca0" font-size="11" text-anchor="middle">CYCLE  CC 86</text>
+<text x="1104" y="184" fill="#ff9a1f" font-size="13" text-anchor="middle" font-weight="bold">FOCUS/MATRIX</text>
+<rect x="790" y="218" width="116" height="60" rx="6" fill="#2a2c31" stroke="#444"/>
+<text x="848" y="236" fill="#9a9ca0" font-size="11" text-anchor="middle">REW  CC 87</text>
+<text x="848" y="258" fill="#ff9a1f" font-size="13" text-anchor="middle" font-weight="bold">ALGO &lt;</text>
+<rect x="918" y="218" width="116" height="60" rx="6" fill="#2a2c31" stroke="#444"/>
+<text x="976" y="236" fill="#9a9ca0" font-size="11" text-anchor="middle">FF  CC 88</text>
+<text x="976" y="258" fill="#ff9a1f" font-size="13" text-anchor="middle" font-weight="bold">ALGO &gt;</text>
+<rect x="1046" y="218" width="116" height="60" rx="6" fill="#2a2c31" stroke="#444"/>
+<text x="1104" y="236" fill="#9a9ca0" font-size="11" text-anchor="middle">PLAY  CC 89</text>
+<text x="1104" y="258" fill="#ff9a1f" font-size="13" text-anchor="middle" font-weight="bold">FREEZE ALL</text>
+<rect x="790" y="292" width="116" height="60" rx="6" fill="#2a2c31" stroke="#444"/>
+<text x="848" y="310" fill="#9a9ca0" font-size="11" text-anchor="middle">STOP  CC 90</text>
+<text x="848" y="332" fill="#ff9a1f" font-size="13" text-anchor="middle" font-weight="bold">PAGE ON/OFF</text>
+<rect x="918" y="292" width="116" height="60" rx="6" fill="#2a2c31" stroke="#444"/>
+<text x="976" y="310" fill="#9a9ca0" font-size="11" text-anchor="middle">REC  CC 91</text>
+<text x="976" y="332" fill="#ff9a1f" font-size="13" text-anchor="middle" font-weight="bold">SAVE</text>
+<rect x="1046" y="292" width="116" height="60" rx="6" fill="#2a2c31" stroke="#444"/>
+<text x="1104" y="310" fill="#9a9ca0" font-size="11" text-anchor="middle">JOG  CC 92</text>
+<text x="1104" y="332" fill="#ff9a1f" font-size="13" text-anchor="middle" font-weight="bold">TURN SELECTED</text>
+<text x="790" y="390" fill="#9a9ca0" font-size="12">Buttons: Momentary, on 127 / off 0.</text>
+<text x="790" y="410" fill="#9a9ca0" font-size="12">Jog: relative, 1 = right, 127 = left.</text>
+<text x="790" y="430" fill="#9a9ca0" font-size="12">Knobs, faders: CC, 0 - 127.</text>
+<text x="790" y="458" fill="#9a9ca0" font-size="12">P1-P4 are the stick parameters;</text>
+<text x="790" y="476" fill="#9a9ca0" font-size="12">P5-P8 the small knobs on each box.</text>
+<text x="790" y="504" fill="#9a9ca0" font-size="12">Anything else: SETUP &gt; MIDI LEARN.</text>
+</svg>

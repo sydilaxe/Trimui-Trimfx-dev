@@ -11,7 +11,7 @@
  *
  * Settings (env, in launch.sh): TFX_BUFFER, TFX_AUDIO=<output name part>,
  * TFX_INPUT=<capture name part>, TFX_LEDS=0, TFX_LOG=0|1|2, TFX_WINDOWED=1,
- * TFX_SCREEN_WAKE (set by mux_launch.sh), TFX_SHOT=<file.bmp> (desktop: run
+ * TFX_MIDI=<device glob> (default /dev/snd/midiC*D*), TFX_SCREEN_WAKE (set by mux_launch.sh), TFX_SHOT=<file.bmp> (desktop: run
  * a scripted tour and save screenshots, then quit). */
 #define _GNU_SOURCE
 #include <SDL2/SDL.h>
@@ -31,6 +31,7 @@
 #include "dsp.h"
 #include "engine.h"
 #include "gfx.h"
+#include "midi.h"
 #include "perflog.h"
 #include "ringleds.h"
 
@@ -321,7 +322,7 @@ enum { COL_TONE, COL_MOD, COL_DELAY, COL_VERB, COL_MASTER, NCOL };
 enum { R_ALGO, R_K1, R_K2, R_K3, R_K4, R_D1, R_D2, R_D3, R_D4, R_MIX, NPROW };
 enum { MR_IN, MR_OUT, MR_DRY, MR_TEMPO, MR_ORDER, MR_SLOT, MR_SETUP, MR_STICKS, NMROW };
 enum { OV_NONE, OV_SETUP, OV_STICKS };
-enum { SR_INPUT, SR_OUTPUT, SR_SAVE, SR_LOAD, SR_FACTORY, SR_INIT, NSROW };
+enum { SR_INPUT, SR_OUTPUT, SR_SAVE, SR_LOAD, SR_FACTORY, SR_MIDI, SR_MIDIMAP, SR_INIT, NSROW };
 #define NXROW (3 + NAX * 2 * 2)
 static int col = COL_MOD, focus_mod = M_MOD;
 static int sel[NCOL] = {R_K1, R_K1, R_K1, R_K1, MR_IN};
@@ -519,6 +520,9 @@ static void set_col(int c)
 
 /* ---------------------------------------------------------------- turning things */
 static int init_armed;
+static int midi_learn; /* MIDI LEARN armed */
+static void midimap_default(void);
+static void midimap_path(char *out, int n);
 
 static void adjust(int dir, int big)
 {
@@ -595,6 +599,18 @@ static void press_a(void)
             toast("FACTORY: %s", nm);
             changed();
         } break;
+        case SR_MIDI:
+            midi_learn = 1;
+            overlay = OV_NONE;
+            toast("LEARN: CHOOSE A CONTROL, THEN MOVE A MIDI ONE");
+            return;
+        case SR_MIDIMAP: {
+            char path[600];
+            midimap_path(path, sizeof path);
+            unlink(path);
+            midimap_default();
+            toast("MIDI MAP: THE TRIMFX TEMPLATE");
+        } return;
         case SR_INIT:
             if (init_armed) { patch_default(&base); matrix_default(); snprintf(patch_name, sizeof patch_name, "INIT"); toast("ALL BACK TO INIT"); init_armed = 0; changed(); return; }
             init_armed = 1;
@@ -640,9 +656,9 @@ static void button(BiButton b, int down)
     case BI_DOWN: move_row(+1); break;
     case BI_LEFT: adjust(-1, 0); break;
     case BI_RIGHT: adjust(+1, 0); break;
-    case BI_L1: case BI_R1:
+    case BI_L1: case BI_R1: case BI_F1: case BI_F2: /* F1 / F2: pages without the shoulder buttons */
         if (overlay) overlay = overlay == OV_SETUP ? OV_STICKS : OV_SETUP;
-        else set_col(col + (b == BI_R1 ? 1 : -1));
+        else set_col(col + (b == BI_R1 || b == BI_F2 ? 1 : -1));
         break;
     case BI_L2: case BI_R2: {
         int m = focus_mod, na = eng_info(m)->nalgo;
@@ -653,6 +669,7 @@ static void button(BiButton b, int down)
     case BI_A: press_a(); break;
     case BI_B:
         if (overlay) overlay = OV_NONE;
+        else if (midi_learn) { midi_learn = 0; toast("MIDI LEARN OFF"); }
         else { stick_matrix ^= 1; toast("STICKS: %s", stick_matrix ? "MATRIX" : "FOCUS"); changed(); }
         break;
     case BI_X: stick_latch ^= 1; toast("STICKS: %s", stick_latch ? "LATCH" : "SPRING"); changed(); break;
@@ -665,11 +682,250 @@ static void button(BiButton b, int down)
     case BI_START: save_slot(preset_slot); break;
     case BI_L3: base.freeze_dly ^= 1; toast("DELAY %s", base.freeze_dly ? "FROZEN" : "FLOWING"); break;
     case BI_R3: base.freeze_verb ^= 1; toast("REVERB %s", base.freeze_verb ? "FROZEN" : "FLOWING"); break;
-    case BI_F1: load_factory_or_slot(-1); break;
-    case BI_F2: load_factory_or_slot(+1); break;
     case BI_HOME: overlay = overlay ? OV_NONE : OV_SETUP; break;
     case BI_MENU: running = 0; break;
     default: break;
+    }
+}
+
+/* ---------------------------------------------------------------- MIDI */
+/* A USB MIDI controller (a Korg nanoKONTROL Studio with the TRIMFX template,
+ * docs/midi.md, or anything else through MIDI LEARN). The map: which CC or
+ * note on which channel does what. midimap.txt in the app folder, if there,
+ * replaces the built-in template. */
+enum { MA_PARAM, MA_MIX, MA_ALGO, MA_ALGOSTEP, MA_BYPASS, MA_FREEZE, MA_MASTER, MA_ORDER, MA_PAGE, MA_PAGETO,
+       MA_PRESET, MA_SAVE, MA_TAP, MA_STICK, MA_JOG, MA_N };
+static const char *const MA_NAME[MA_N] = {"PARAM", "MIX", "ALGO", "ALGOSTEP", "BYPASS", "FREEZE", "MASTER", "ORDER",
+                                          "PAGE", "PAGETO", "PRESET", "SAVE", "TAP", "STICK", "JOG"};
+#define MM_PAGE (-1)  /* the module on screen */
+#define MM_CHAN (-2)  /* by channel: 1 = the module on screen, 2..5 = TONE, MOD, DELAY, REVERB */
+static const char *const MM_NAME[NMOD + 2] = {"CHAN", "PAGE", "TONE", "MOD", "DELAY", "VERB"}; /* [mod + 2] */
+static int uses_mod(int act) { return act <= MA_BYPASS; }
+typedef struct { signed char ch; unsigned char note, num; signed char act, mod, arg; } MidiMap; /* ch -1: any */
+#define MAXMAP 160
+static MidiMap mtab[MAXMAP];
+static int nmap, midi_seen;
+static Uint32 midi_flash;
+static unsigned char mlast[2][16][128];
+
+/* the TRIMFX template (docs/midi.md); knobs per channel, the rest on any channel */
+static void midimap_default(void)
+{
+    nmap = 0;
+#define MAP(c, n, a, m, g) mtab[nmap++] = (MidiMap){c, 0, n, a, m, g}
+    for (int k = 0; k < 8; k++) MAP(-1, 21 + k, MA_PARAM, MM_CHAN, k);           /* knobs 1-8 */
+    for (int m = 0; m < NMOD; m++) MAP(-1, 31 + m, MA_MIX, m, 0);                /* faders 1-4 */
+    for (int k = 0; k < 4; k++) MAP(-1, 35 + k, MA_MASTER, 0, k);                /* faders 5-8: IN DRY OUT TEMPO */
+    for (int m = 0; m < NMOD; m++) MAP(-1, 41 + m, MA_BYPASS, m, 0);             /* SOLO 1-4: footswitches */
+    MAP(-1, 45, MA_FREEZE, 0, 0); MAP(-1, 46, MA_FREEZE, 0, 1);                  /* SOLO 5-6 */
+    MAP(-1, 47, MA_STICK, 0, 2); MAP(-1, 48, MA_STICK, 0, 1);                    /* SOLO 7-8: HOLD, LATCH */
+    for (int m = 0; m < NMOD; m++) MAP(-1, 51 + m, MA_ALGOSTEP, m, -1);          /* MUTE 1-4: algorithm down */
+    MAP(-1, 55, MA_ORDER, 0, -1); MAP(-1, 56, MA_STICK, 0, 0);                   /* MUTE 5-6 */
+    for (int m = 0; m < NMOD; m++) MAP(-1, 61 + m, MA_ALGOSTEP, m, +1);          /* REC 1-4: algorithm up */
+    MAP(-1, 65, MA_ORDER, 0, +1);                                                /* REC 5 */
+    for (int c = 0; c < NCOL; c++) MAP(-1, 71 + c, MA_PAGETO, 0, c);             /* SELECT 1-5: show a page */
+    MAP(-1, 81, MA_PAGE, 0, -1); MAP(-1, 82, MA_PAGE, 0, +1);                    /* TRACK < > */
+    MAP(-1, 83, MA_PRESET, 0, -1); MAP(-1, 84, MA_PRESET, 0, +1);                /* MARKER < > */
+    MAP(-1, 85, MA_TAP, 0, 0);                                                   /* MARKER SET */
+    MAP(-1, 86, MA_STICK, 0, 0);                                                 /* CYCLE: FOCUS / MATRIX */
+    MAP(-1, 87, MA_ALGOSTEP, MM_PAGE, -1); MAP(-1, 88, MA_ALGOSTEP, MM_PAGE, +1); /* REW FF */
+    MAP(-1, 89, MA_FREEZE, 0, 2); MAP(-1, 90, MA_BYPASS, MM_PAGE, 0);            /* PLAY: freeze both, STOP: footswitch */
+    MAP(-1, 91, MA_SAVE, 0, 0);                                                  /* REC */
+    MAP(-1, 92, MA_JOG, 0, 0);                                                   /* the jog wheel */
+#undef MAP
+}
+
+static void midimap_path(char *out, int n) { snprintf(out, n, "%s/midimap.txt", app_dir); }
+
+static void midimap_save(void)
+{
+    char path[600], tmp[620];
+    midimap_path(path, sizeof path);
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    FILE *f = fopen(tmp, "w");
+    if (!f) return;
+    fprintf(f, "# TrimFX MIDI map: channel (1-16 or *), cc<n> or note<n>, action, module, value. See docs/midi.md.\n");
+    for (int i = 0; i < nmap; i++) {
+        MidiMap *m = &mtab[i];
+        char ch[8];
+        if (m->ch < 0) snprintf(ch, sizeof ch, "*"); else snprintf(ch, sizeof ch, "%d", m->ch + 1);
+        fprintf(f, "%s %s%d %s %s %d\n", ch, m->note ? "note" : "cc", m->num, MA_NAME[(int)m->act], uses_mod(m->act) ? MM_NAME[m->mod + 2] : "-", m->arg);
+    }
+    fclose(f);
+    rename(tmp, path);
+}
+
+static void midimap_load(void)
+{
+    midimap_default();
+    char path[600], line[160];
+    midimap_path(path, sizeof path);
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    nmap = 0;
+    while (fgets(line, sizeof line, f) && nmap < MAXMAP) {
+        char ch[8], src[16], act[16], mod[16];
+        int arg = 0;
+        if (line[0] == '#' || sscanf(line, "%7s %15s %15s %15s %d", ch, src, act, mod, &arg) < 4) continue;
+        MidiMap m = {ch[0] == '*' ? -1 : (signed char)(atoi(ch) - 1), 0, 0, -1, -3, (signed char)arg};
+        if (!strncmp(src, "note", 4)) m.note = 1, m.num = (unsigned char)atoi(src + 4);
+        else if (!strncmp(src, "cc", 2)) m.num = (unsigned char)atoi(src + 2);
+        else continue;
+        for (int a = 0; a < MA_N; a++) if (!strcmp(act, MA_NAME[a])) m.act = (signed char)a;
+        for (int k = 0; k < NMOD + 2; k++) if (!strcmp(mod, MM_NAME[k])) m.mod = (signed char)(k - 2);
+        if (m.act >= 0 && !uses_mod(m.act)) m.mod = 0;
+        if (m.act < 0 || m.mod < -2 || m.ch > 15) continue;
+        mtab[nmap++] = m;
+    }
+    fclose(f);
+}
+
+/* the module a mapping means, for a message on channel ch; -1 none */
+static int map_mod(const MidiMap *m, int ch)
+{
+    if (m->mod == MM_PAGE) return focus_mod;
+    if (m->mod == MM_CHAN) return ch == 0 ? focus_mod : ch <= NMOD ? ch - 1 : -1;
+    return m->mod;
+}
+
+static void midi_apply(const MidiMap *m, int ch, int val, int rise)
+{
+    float v = val / 127.f;
+    int mod = map_mod(m, ch);
+    char b[48];
+    switch (m->act) {
+    case MA_PARAM: {
+        if (mod < 0 || !param_used(mod, m->arg)) return;
+        ModState *ms = &base.m[mod];
+        ms->p[ms->algo][m->arg] = v;
+        eng_info(mod)->fmt(ms->algo, m->arg, v, &base, b, sizeof b);
+        toast("%s %s  %s", eng_info(mod)->name, eng_info(mod)->pname[ms->algo][m->arg], b);
+    } break;
+    case MA_MIX:
+        if (mod < 0) return;
+        base.m[mod].mix = v;
+        toast("%s MIX  %.0f%%", eng_info(mod)->name, v * 100.f);
+        break;
+    case MA_ALGO: {
+        if (mod < 0) return;
+        int na = eng_info(mod)->nalgo, a = val * na / 128;
+        if (a == base.m[mod].algo) return;
+        base.m[mod].algo = a;
+        toast("%s: %s", eng_info(mod)->name, eng_info(mod)->algo[a]);
+    } break;
+    case MA_ALGOSTEP: {
+        if (mod < 0 || !rise) return;
+        int na = eng_info(mod)->nalgo;
+        base.m[mod].algo = (base.m[mod].algo + m->arg + na) % na;
+        toast("%s: %s", eng_info(mod)->name, eng_info(mod)->algo[base.m[mod].algo]);
+    } break;
+    case MA_BYPASS:
+        if (mod < 0 || !rise) return;
+        base.m[mod].bypass ^= 1;
+        toast("%s %s", eng_info(mod)->name, base.m[mod].bypass ? "BYPASSED" : "ON");
+        break;
+    case MA_FREEZE:
+        if (!rise) return;
+        if (m->arg == 2) { int f = !(base.freeze_dly && base.freeze_verb); base.freeze_dly = base.freeze_verb = f; toast("ALL %s", f ? "FROZEN" : "FLOWING"); }
+        else if (m->arg) { base.freeze_verb ^= 1; toast("REVERB %s", base.freeze_verb ? "FROZEN" : "FLOWING"); }
+        else { base.freeze_dly ^= 1; toast("DELAY %s", base.freeze_dly ? "FROZEN" : "FLOWING"); }
+        break;
+    case MA_MASTER:
+        switch (m->arg) {
+        case 0: base.in_db = -24.f + 48.f * v; toast("IN %+.1f dB", base.in_db); break;
+        case 1: base.out_db = -24.f + 48.f * v; toast("OUT %+.1f dB", base.out_db); break;
+        case 2: base.dry = v; toast("DRY %.0f%%", v * 100.f); break;
+        default: base.bpm = roundf(40.f + 200.f * v); toast("TEMPO %.0f BPM", base.bpm); break;
+        }
+        break;
+    case MA_ORDER:
+        if (!rise) return;
+        base.order = (base.order + m->arg + NORDER) % NORDER;
+        toast("ORDER %s", eng_order_name(base.order));
+        break;
+    case MA_PAGE: if (rise) { overlay = OV_NONE; set_col(col + m->arg); } return;
+    case MA_PAGETO: if (rise) { overlay = OV_NONE; set_col(m->arg); } return;
+    case MA_PRESET: if (rise) load_factory_or_slot(m->arg); return;
+    case MA_SAVE: if (rise) save_slot(preset_slot); return;
+    case MA_TAP: if (rise) tap_tempo(); return;
+    case MA_STICK:
+        if (!rise) return;
+        if (m->arg == 0) { stick_matrix ^= 1; toast("STICKS: %s", stick_matrix ? "MATRIX" : "FOCUS"); }
+        else if (m->arg == 1) { stick_latch ^= 1; toast("STICKS: %s", stick_latch ? "LATCH" : "SPRING"); }
+        else {
+            hold_on ^= 1;
+            if (hold_on) { float hv[NAX] = {sx[0], sy[0], sx[1], sy[1]}; memcpy(hold_v, hv, sizeof hv); }
+            toast("STICKS %s", hold_on ? "HELD" : "LIVE");
+        }
+        break;
+    case MA_JOG: {
+        /* relative: 1..63 up, 65..127 down (two's complement); 64 nothing */
+        int d = val < 64 ? val : val - 128;
+        for (int i = 0; i < abs(d) && i < 16; i++) adjust(d > 0 ? 1 : -1, 0);
+        return;
+    }
+    default: return;
+    }
+    changed();
+}
+
+/* MIDI LEARN: the control chosen on the board, as a mapping */
+static int learn_target(MidiMap *m)
+{
+    m->mod = 0;
+    m->arg = 0;
+    if (col == COL_MASTER) {
+        static const int R[] = {MR_IN, MR_OUT, MR_DRY, MR_TEMPO};
+        for (int i = 0; i < 4; i++) if (sel[col] == R[i]) { m->act = MA_MASTER; m->arg = (signed char)i; return 1; }
+        if (sel[col] == MR_ORDER) { m->act = MA_ORDER; m->arg = 1; return 1; }
+        if (sel[col] == MR_SLOT) { m->act = MA_PRESET; m->arg = 1; return 1; }
+        return 0;
+    }
+    m->mod = (signed char)col;
+    int r = sel[col];
+    if (r == R_ALGO) m->act = m->note ? MA_ALGOSTEP : MA_ALGO, m->arg = 1;
+    else if (r == R_MIX) m->act = MA_MIX;
+    else m->act = MA_PARAM, m->arg = (signed char)(r - R_K1);
+    return 1;
+}
+
+static void learn_name(const MidiMap *m, char *o, int n)
+{
+    if (m->act == MA_MASTER) { static const char *const N[] = {"IN", "OUT", "DRY", "TEMPO"}; snprintf(o, n, "MASTER %s", N[m->arg & 3]); return; }
+    if (m->act == MA_ORDER) { snprintf(o, n, "ORDER"); return; }
+    if (m->act == MA_PRESET) { snprintf(o, n, "PRESET"); return; }
+    const ModInfo *mi = eng_info(m->mod);
+    if (m->act == MA_PARAM) snprintf(o, n, "%s P%d %s", mi->name, m->arg + 1, mi->pname[base.m[m->mod].algo][m->arg]);
+    else snprintf(o, n, "%s %s", mi->name, m->act == MA_MIX ? "MIX" : "ALGO");
+}
+
+static void midi_event(const MidiEv *e)
+{
+    int src = e->note, ch = e->ch, num = e->num & 127, val = e->val & 127;
+    int rise = val >= 64 && mlast[src][ch][num] < 64;
+    mlast[src][ch][num] = (unsigned char)val;
+    midi_seen = 1;
+    midi_flash = SDL_GetTicks() + 120;
+    if (perf_level() >= PERF_DETAIL) perf_log("MIDI", "ch %d %s %d = %d", ch + 1, src ? "note" : "cc", num, val);
+    if (midi_learn) {
+        if (src && val == 0) return; /* a note's release */
+        MidiMap m = {(signed char)ch, (unsigned char)src, (unsigned char)num, 0, 0, 0};
+        if (!learn_target(&m)) { toast("LEARN: CHOOSE A KNOB, MIX, ALGO OR MASTER LEVEL"); return; }
+        /* the new one replaces whatever that CC / note did */
+        for (int i = 0; i < nmap; i++)
+            if (mtab[i].note == m.note && mtab[i].num == m.num && (mtab[i].ch < 0 || mtab[i].ch == m.ch)) mtab[i--] = mtab[--nmap];
+        if (nmap < MAXMAP) mtab[nmap++] = m;
+        midimap_save();
+        char nm[64];
+        learn_name(&m, nm, sizeof nm);
+        toast("LEARNED %s %d CH %d: %s", src ? "NOTE" : "CC", num, ch + 1, nm);
+        midi_learn = 0;
+        return;
+    }
+    for (int i = 0; i < nmap; i++) {
+        const MidiMap *m = &mtab[i];
+        if (m->note != src || m->num != num || (m->ch >= 0 && m->ch != ch)) continue;
+        midi_apply(m, ch, val, rise);
     }
 }
 
@@ -1159,6 +1415,13 @@ static void draw_top(void)
     int w = gfx_text_w(b, FONT_SMALL) + 20;
     gfx_fill(10, 5, w, 26, 0x14161a);
     gfx_text(20, 7, b, in_dev ? 0xf2f2f2 : 0xff8080, FONT_SMALL);
+    if (midi_count() || midi_learn) {
+        snprintf(b, sizeof b, "%s %s", midi_learn ? "LEARN" : "MIDI", midi_count() ? midi_name() : "-");
+        fit(b, 220);
+        int mw = gfx_text_w(b, FONT_SMALL) + 20, mx = W / 2 - mw / 2 + 60;
+        gfx_fill(mx, 5, mw, 26, midi_learn ? ACCENT : 0x14161a);
+        gfx_text(mx + 10, 7, b, midi_learn ? 0x14161a : SDL_GetTicks() < midi_flash ? ACCENT : 0xf2f2f2, FONT_SMALL);
+    }
     snprintf(b, sizeof b, "STICKS %s %s%s", stick_matrix ? "MATRIX" : "FOCUS", stick_latch ? "LATCH" : "SPRING", hold_on ? " HELD" : "");
     w = gfx_text_w(b, FONT_SMALL) + 20;
     gfx_fill(W - 10 - w, 5, w, 26, 0x14161a);
@@ -1187,7 +1450,7 @@ static void draw_overlay(void)
     text_c(x + w / 4, y + 10, "SETUP", overlay == OV_SETUP ? C_TEXT : C_DIM, FONT_LARGE);
     text_c(x + 3 * w / 4, y + 10, "STICKS", overlay == OV_STICKS ? C_TEXT : C_DIM, FONT_LARGE);
     gfx_fill(overlay == OV_SETUP ? x + 40 : x + w / 2 + 40, y + 50, w / 2 - 80, 3, C_ACC);
-    gfx_text(x + 16, y + h - 30, "L1/R1 tab   up/down choose   left/right change   A do   B close", C_DIM, FONT_SMALL);
+    gfx_text(x + 16, y + h - 30, "F1/F2 tab   up/down choose   left/right change   A do   B close", C_DIM, FONT_SMALL);
     int ry = y + 72;
     char lab[48], v[96];
     if (overlay == OV_SETUP) {
@@ -1198,6 +1461,8 @@ static void draw_overlay(void)
             case SR_SAVE: snprintf(lab, sizeof lab, "SAVE TO SLOT"); snprintf(v, sizeof v, "%d  (A)", preset_slot + 1); break;
             case SR_LOAD: snprintf(lab, sizeof lab, "LOAD SLOT"); snprintf(v, sizeof v, "%d  (A)", preset_slot + 1); break;
             case SR_FACTORY: { Patch tmp; snprintf(lab, sizeof lab, "FACTORY"); snprintf(v, sizeof v, "%d %s  (A)", factory_pick + 1, patch_factory(&tmp, factory_pick)); } break;
+            case SR_MIDI: snprintf(lab, sizeof lab, "MIDI LEARN"); snprintf(v, sizeof v, "%s  (A)", midi_count() ? midi_name() : "NO MIDI DEVICE"); break;
+            case SR_MIDIMAP: snprintf(lab, sizeof lab, "MIDI MAP"); snprintf(v, sizeof v, "%d MAPPINGS   TEMPLATE (A)", nmap); break;
             default: snprintf(lab, sizeof lab, "INIT ALL"); snprintf(v, sizeof v, "A, twice"); break;
             }
             row_box(x + 16, ry + r * 38, w - 32, ov_sel[OV_SETUP] == r, lab, v, C_ACC, NULL, 0, -1.f);
@@ -1390,6 +1655,7 @@ int main(int argc, char **argv)
     }
     build_live(0.f);
     publish(&live);
+    midimap_load();
 
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_JOYSTICK) < 0) {
@@ -1441,6 +1707,11 @@ int main(int argc, char **argv)
                 button(ev[i].button, ev[i].down);
             }
         }
+        {
+            MidiEv me[64];
+            int nm = midi_poll(me, 64);
+            for (int i = 0; i < nm; i++) midi_event(&me[i]);
+        }
         repeats();
         build_live(dt);
         publish(&live);
@@ -1484,6 +1755,7 @@ int main(int argc, char **argv)
     if (in_dev) SDL_CloseAudioDevice(in_dev);
     engine_free(eng);
     ringleds_close();
+    midi_close();
     bi_switch_close();
     perf_close();
     SDL_Quit();
