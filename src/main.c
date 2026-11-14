@@ -520,7 +520,16 @@ static void set_col(int c)
 
 /* ---------------------------------------------------------------- turning things */
 static int init_armed;
-static int midi_learn; /* MIDI LEARN armed */
+/* what a MIDI mapping does (see the MIDI section) */
+enum { MA_PARAM, MA_MIX, MA_ALGO, MA_ALGOSTEP, MA_BYPASS, MA_FREEZE, MA_MASTER, MA_ORDER, MA_PAGE, MA_PAGETO,
+       MA_PRESET, MA_SAVE, MA_TAP, MA_STICK, MA_JOG, MA_N };
+static int midi_learn;      /* MIDI LEARN: on until B (or SELECT held) */
+static int learn_custom;    /* 1: a button chose the target (footswitch, freeze...), not the board */
+static signed char learn_act, learn_mod, learn_arg;
+static int learn_last = -1; /* the CC / note just learned (src << 12 | ch << 8 | num): not learned again at once */
+static Uint32 sel_down_at;
+static int sel_long;
+static void learn_on(int on);
 static void midimap_default(void);
 static void midimap_path(char *out, int n);
 
@@ -600,9 +609,8 @@ static void press_a(void)
             changed();
         } break;
         case SR_MIDI:
-            midi_learn = 1;
             overlay = OV_NONE;
-            toast("LEARN: CHOOSE A CONTROL, THEN MOVE A MIDI ONE");
+            learn_on(1);
             return;
         case SR_MIDIMAP: {
             char path[600];
@@ -650,7 +658,25 @@ static void button(BiButton b, int down)
     if (!down) return;
     rep_at[b] = SDL_GetTicks() + 350;
     rep_n[b] = 0;
+    if (b == BI_SELECT) { sel_down_at = SDL_GetTicks(); sel_long = 0; }
     if (b != BI_A) init_armed = 0;
+    if (midi_learn && !overlay) {
+        /* the buttons choose what to learn: press one, then the MIDI control */
+        int a = -1, m = 0, g = 0;
+        switch (b) {
+        case BI_A: if (col < COL_MASTER) a = MA_BYPASS, m = col; break;
+        case BI_L3: a = MA_FREEZE, g = 0; break;
+        case BI_R3: a = MA_FREEZE, g = 1; break;
+        case BI_X: a = MA_STICK, g = 1; break;
+        case BI_Y: a = MA_STICK, g = 2; break;
+        case BI_SELECT: a = MA_TAP; break;
+        case BI_START: a = MA_SAVE; break;
+        case BI_L2: case BI_R2: a = MA_ALGOSTEP, m = focus_mod, g = b == BI_R2 ? 1 : -1; break;
+        case BI_B: learn_on(0); return;
+        default: learn_custom = 0; learn_last = -1; break; /* moving on the board: learn what is chosen there */
+        }
+        if (a >= 0) { learn_custom = 1; learn_act = (signed char)a; learn_mod = (signed char)m; learn_arg = (signed char)g; learn_last = -1; return; }
+    }
     switch (b) {
     case BI_UP: move_row(-1); break;
     case BI_DOWN: move_row(+1); break;
@@ -669,7 +695,6 @@ static void button(BiButton b, int down)
     case BI_A: press_a(); break;
     case BI_B:
         if (overlay) overlay = OV_NONE;
-        else if (midi_learn) { midi_learn = 0; toast("MIDI LEARN OFF"); }
         else { stick_matrix ^= 1; toast("STICKS: %s", stick_matrix ? "MATRIX" : "FOCUS"); changed(); }
         break;
     case BI_X: stick_latch ^= 1; toast("STICKS: %s", stick_latch ? "LATCH" : "SPRING"); changed(); break;
@@ -693,8 +718,6 @@ static void button(BiButton b, int down)
  * docs/midi.md, or anything else through MIDI LEARN). The map: which CC or
  * note on which channel does what. midimap.txt in the app folder, if there,
  * replaces the built-in template. */
-enum { MA_PARAM, MA_MIX, MA_ALGO, MA_ALGOSTEP, MA_BYPASS, MA_FREEZE, MA_MASTER, MA_ORDER, MA_PAGE, MA_PAGETO,
-       MA_PRESET, MA_SAVE, MA_TAP, MA_STICK, MA_JOG, MA_N };
 static const char *const MA_NAME[MA_N] = {"PARAM", "MIX", "ALGO", "ALGOSTEP", "BYPASS", "FREEZE", "MASTER", "ORDER",
                                           "PAGE", "PAGETO", "PRESET", "SAVE", "TAP", "STICK", "JOG"};
 #define MM_PAGE (-1)  /* the module on screen */
@@ -872,6 +895,7 @@ static void midi_apply(const MidiMap *m, int ch, int val, int rise)
 /* MIDI LEARN: the control chosen on the board, as a mapping */
 static int learn_target(MidiMap *m)
 {
+    if (learn_custom) { m->act = learn_act; m->mod = learn_mod; m->arg = learn_arg; return 1; }
     m->mod = 0;
     m->arg = 0;
     if (col == COL_MASTER) {
@@ -894,9 +918,42 @@ static void learn_name(const MidiMap *m, char *o, int n)
     if (m->act == MA_MASTER) { static const char *const N[] = {"IN", "OUT", "DRY", "TEMPO"}; snprintf(o, n, "MASTER %s", N[m->arg & 3]); return; }
     if (m->act == MA_ORDER) { snprintf(o, n, "ORDER"); return; }
     if (m->act == MA_PRESET) { snprintf(o, n, "PRESET"); return; }
-    const ModInfo *mi = eng_info(m->mod);
+    if (m->act == MA_FREEZE) { snprintf(o, n, "FREEZE %s", m->arg == 2 ? "ALL" : m->arg ? "REVERB" : "DELAY"); return; }
+    if (m->act == MA_STICK) { snprintf(o, n, "STICKS %s", m->arg == 2 ? "HOLD" : m->arg ? "LATCH" : "MATRIX"); return; }
+    if (m->act == MA_TAP) { snprintf(o, n, "TAP TEMPO"); return; }
+    if (m->act == MA_SAVE) { snprintf(o, n, "SAVE"); return; }
+    if (m->act > MA_BYPASS) { snprintf(o, n, "%s", MA_NAME[(int)m->act]); return; }
+    const ModInfo *mi = eng_info(m->mod < 0 ? focus_mod : m->mod);
+    if (m->act == MA_BYPASS) { snprintf(o, n, "%s FOOTSWITCH", mi->name); return; }
+    if (m->act == MA_ALGOSTEP) { snprintf(o, n, "%s ALGO %s", mi->name, m->arg > 0 ? "+" : "-"); return; }
     if (m->act == MA_PARAM) snprintf(o, n, "%s P%d %s", mi->name, m->arg + 1, mi->pname[base.m[m->mod].algo][m->arg]);
     else snprintf(o, n, "%s %s", mi->name, m->act == MA_MIX ? "MIX" : "ALGO");
+}
+
+static void learn_on(int on)
+{
+    midi_learn = on;
+    learn_custom = 0;
+    learn_last = -1;
+    toast(on ? "MIDI LEARN ON" : "MIDI LEARN OFF");
+}
+
+/* what the pending target is mapped from now, for the banner */
+static void learn_now(const MidiMap *t, char *o, int n)
+{
+    int k = 0;
+    o[0] = 0;
+    for (int i = 0; i < nmap && k < 3; i++) {
+        const MidiMap *m = &mtab[i];
+        if (m->act != t->act || m->arg != t->arg) continue;
+        if (uses_mod(m->act) && m->mod != t->mod && m->mod >= 0) continue;
+        char c[8];
+        if (m->ch < 0) snprintf(c, sizeof c, "*"); else snprintf(c, sizeof c, "%d", m->ch + 1);
+        size_t l = strlen(o);
+        snprintf(o + l, n - l, "%s%s %d CH %s", k ? ", " : "", m->note ? "NOTE" : "CC", m->num, c);
+        k++;
+    }
+    if (!k) snprintf(o, n, "NOT MAPPED");
 }
 
 static void midi_event(const MidiEv *e)
@@ -909,8 +966,11 @@ static void midi_event(const MidiEv *e)
     if (perf_level() >= PERF_DETAIL) perf_log("MIDI", "ch %d %s %d = %d", ch + 1, src ? "note" : "cc", num, val);
     if (midi_learn) {
         if (src && val == 0) return; /* a note's release */
+        int id = src << 12 | ch << 8 | num;
+        if (id == learn_last) return;    /* still turning the knob just learned */
         MidiMap m = {(signed char)ch, (unsigned char)src, (unsigned char)num, 0, 0, 0};
-        if (!learn_target(&m)) { toast("LEARN: CHOOSE A KNOB, MIX, ALGO OR MASTER LEVEL"); return; }
+        if (!learn_target(&m)) { toast("LEARN: CHOOSE A CONTROL OR PRESS A BUTTON"); return; }
+        learn_last = id;
         /* the new one replaces whatever that CC / note did */
         for (int i = 0; i < nmap; i++)
             if (mtab[i].note == m.note && mtab[i].num == m.num && (mtab[i].ch < 0 || mtab[i].ch == m.ch)) mtab[i--] = mtab[--nmap];
@@ -919,7 +979,6 @@ static void midi_event(const MidiEv *e)
         char nm[64];
         learn_name(&m, nm, sizeof nm);
         toast("LEARNED %s %d CH %d: %s", src ? "NOTE" : "CC", num, ch + 1, nm);
-        midi_learn = 0;
         return;
     }
     for (int i = 0; i < nmap; i++) {
@@ -932,6 +991,7 @@ static void midi_event(const MidiEv *e)
 static void repeats(void)
 {
     Uint32 now = SDL_GetTicks();
+    if (held[BI_SELECT] && !sel_long && now - sel_down_at > 1000) { sel_long = 1; overlay = OV_NONE; learn_on(!midi_learn); }
     static const BiButton R[4] = {BI_UP, BI_DOWN, BI_LEFT, BI_RIGHT};
     for (int i = 0; i < 4; i++) {
         BiButton b = R[i];
@@ -1521,6 +1581,26 @@ static void draw(void)
     for (int k = 0; k < 4; k++) pedal(PED_X(k), ord[k]);
     master_strip(MST_X, MST_W);
     if (overlay) draw_overlay();
+    if (midi_learn && !overlay) {
+        MidiMap t = {0, 0, 0, 0, 0, 0};
+        char l1[96], l2[96], nm[64], now[64];
+        if (learn_target(&t)) {
+            learn_name(&t, nm, sizeof nm);
+            learn_now(&t, now, sizeof now);
+            snprintf(l1, sizeof l1, "LEARN  %s", nm);
+            snprintf(l2, sizeof l2, "NOW: %s    MOVE A MIDI CONTROL    B: DONE", now);
+        } else {
+            snprintf(l1, sizeof l1, "LEARN  CHOOSE A CONTROL");
+            snprintf(l2, sizeof l2, "OR PRESS A, L3, R3, X, Y, SELECT, START    B: DONE");
+        }
+        fit(l1, 640);
+        fit(l2, 640);
+        int bw = 680, bx = W / 2 - bw / 2, by = H - 92;
+        gfx_fill_a(bx, by, bw, 66, 0x000000, 230);
+        gfx_rect(bx, by, bw, 66, 2, ACCENT);
+        text_c(W / 2, by + 6, l1, ACCENT, FONT_LARGE);
+        text_c(W / 2, by + 40, l2, C_TEXT, FONT_SMALL);
+    }
     if (SDL_GetTicks() < toast_until) {
         int w = gfx_text_w(toast_msg, FONT_LARGE) + 40;
         gfx_fill_a(W / 2 - w / 2, H / 2 - 30, w, 54, 0x000000, 225);
@@ -1614,6 +1694,14 @@ static void tour(const char *path)
         shot(path, S[i].tag);
     }
     overlay = OV_NONE;
+    midimap_default();
+    set_col(COL_MOD);
+    sel[col] = R_K2;
+    midi_learn = 1;
+    build_live(0.f);
+    draw();
+    shot(path, "learn");
+    midi_learn = 0;
     base = keep;
 }
 

@@ -53,6 +53,6 @@ e('<text x="790" y="410" fill="#9a9ca0" font-size="12">Jog: relative, 1 = right,
 e('<text x="790" y="430" fill="#9a9ca0" font-size="12">Knobs, faders: CC, 0 - 127.</text>')
 e('<text x="790" y="458" fill="#9a9ca0" font-size="12">P1-P4 are the stick parameters;</text>')
 e('<text x="790" y="476" fill="#9a9ca0" font-size="12">P5-P8 the small knobs on each box.</text>')
-e('<text x="790" y="504" fill="#9a9ca0" font-size="12">Anything else: SETUP &gt; MIDI LEARN.</text>')
+e('<text x="790" y="504" fill="#9a9ca0" font-size="12">Anything else: hold SELECT = MIDI LEARN.</text>')
 e('</svg>')
 open(sys.argv[1] if len(sys.argv) > 1 else "docs/midi-template.svg", "w").write("\n".join(out) + "\n")

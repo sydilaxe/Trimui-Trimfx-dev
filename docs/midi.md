@@ -54,11 +54,25 @@ parameters, a knob without one does nothing.
 
 ## MIDI LEARN
 
-**SETUP > MIDI LEARN** (A) closes SETUP and waits. Choose a control on the board with the D-pad
-(a knob, a slider, MIX, ALGORITHM, or IN / OUT / DRY / TEMPO / ORDER / SLOT on MASTER), then move a
-knob or press a pad on the controller: that CC or note, on that channel, now moves it. B stops
-waiting. A learned control always moves the same box. ALGORITHM learned from a knob
-chooses the algorithm across the knob's travel. Learned from a pad, it steps to the next algorithm.
+**Hold SELECT for a second** (or SETUP > MIDI LEARN) to start learning. A banner at the bottom says
+what will be learned and what it is mapped from now. Learning stays on, so a whole controller can be
+mapped in one go:
+
+1. Choose what to map:
+   - a control on the board, with F1 / F2 and the D-pad: a knob, a slider, MIX, ALGORITHM, or on
+     MASTER IN / OUT / DRY / TEMPO / ORDER / SLOT;
+   - or press the button whose job it should do: **A** the box's footswitch, **L3 / R3** freeze
+     the delay / reverb, **X** LATCH, **Y** HOLD, **SELECT** tap tempo, **START** save,
+     **L2 / R2** the box's previous / next algorithm.
+2. Move a knob, fader or pad on the controller. That CC or note, on that channel, now does it.
+   (It keeps turning the same thing while you turn it; choose the next control to learn another.)
+3. **B** (or SELECT held again) ends learning.
+
+A learned control always moves the same box. ALGORITHM learned from a knob chooses the algorithm across
+the knob's travel. Learned from a pad, it steps to the next algorithm. A CC or note learned again
+replaces what it did before.
+
+![MIDI LEARN](screen-learn.png)
 
 The map is then kept in `midimap.txt` beside the app, one line per mapping, and can be edited:
 

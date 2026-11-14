@@ -86,7 +86,7 @@ from MASTER > SETUP or STICKS, or with HOME on the Brick Pro.
 | Y | HOLD the sticks |
 | L2 / R2 | Previous / next algorithm of the selected pedal (or choose ALGORITHM and use ←→) |
 | L3 / R3 | FREEZE the delay / the reverb |
-| SELECT | Tap tempo (RHYTHM, STUTTER) |
+| SELECT | Tap tempo (RHYTHM, STUTTER). Hold for a second: MIDI LEARN on / off |
 | START | Save to the current preset slot |
 | HOME | Open / close SETUP (Brick Pro) |
 | MENU | Quit (the state is saved and comes back next time) |
@@ -100,8 +100,9 @@ seconds. The **TRIMFX template** for the Korg nanoKONTROL Studio puts 36 control
 8 knobs are the eight parameters of a box, the 8 faders are the four MIXes, IN, DRY, OUT and TEMPO,
 and the buttons are the footswitches, freezes, algorithm steps, pages, presets, tap and save.
 Scene 1 follows the page on screen; scenes 2-5 are TONE, MOD, DELAY and REVERB, so all 32 parameters
-are a scene change away. Anything else can be mapped with **SETUP > MIDI LEARN**: choose a
-control on the board, move a MIDI one. See [docs/midi.md](docs/midi.md).
+are a scene change away. Any controller can be mapped with **MIDI LEARN**: hold SELECT, choose a
+control on the board (or press A for the footswitch, L3 / R3 for freeze...), move a MIDI one; on to
+the next, B when done. See [docs/midi.md](docs/midi.md).
 
 ![The TRIMFX template](docs/midi-template.svg)
 
