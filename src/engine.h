@@ -17,7 +17,7 @@
 enum { M_TONE, M_MOD, M_DELAY, M_VERB, NMOD };
 #define NPARAM 16  /* 0-7 on the board (0-3 on the sticks), 8-15 on the DEEP page */
 #define NBOARD 8
-#define MAXALGO 10
+#define MAXALGO 12
 #define NORDER 6
 
 typedef struct {

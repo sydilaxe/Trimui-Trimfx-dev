@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-/* DELAY: four delays sharing 8 s of stereo memory.
+/* DELAY: ten delays sharing 8 s of stereo memory.
  *   GRANULAR  a grain cloud read out of the delay: pitch, density, size,
  *             spray, reverse grains and octave sparkle, fed back into itself
  *   RHYTHM    a tempo-synced multi-tap pattern (echo, ping-pong, triplets,
@@ -19,6 +19,12 @@
  *             repeat it, rising or falling in pitch, sometimes backwards
  *   DUB       a dub echo through a resonant filter that morphs low-pass ->
  *             band-pass -> high-pass, driven past unity into a runaway
+ *   PRISM     the repeats split into four bands, each with its own time: the
+ *             lows come back late and the highs early (or the other way), so
+ *             every echo smears apart into its colours
+ *   ERODE     a digital memory that is failing: each pass is sampled slower,
+ *             with fewer bits, and drops out now and then, so the repeats
+ *             crumble into dust as they go round
  * FREEZE (from the patch) closes the input and holds what is in memory. */
 #include <stdio.h>
 
@@ -73,6 +79,10 @@ void delay_reset(Delay *d, int algo)
     d->gnext = 0.f;
     d->env_f = d->env_s = 0.f;
     d->swell = 1.f;
+    memset(d->psv, 0, sizeof d->psv);
+    for (int k = 0; k < 4; k++) d->ptime[k] = 0.f;
+    d->eh[0] = d->eh[1] = d->eph = d->ehiss[0] = d->ehiss[1] = 0.f;
+    d->egate = d->etgt = 1.f;
 }
 
 /* the tempo divisions, in quarter notes */
@@ -513,8 +523,98 @@ static void dub(Delay *d, const float *p, const float *raw, const Patch *pt, flo
     }
 }
 
+/* ---------------------------------------------------------------- PRISM */
+static const float PBAND[4] = {160.f, 650.f, 2600.f, 9000.f};
+
+static void prism(Delay *d, const float *p, const float *raw, const Patch *pt, float *l, float *r, int n)
+{
+    /* TIME, FEEDBACK, SPREAD (bipolar: + the highs come back later, - the lows), TILT (the bands'
+     * levels: dark .. bright), PAN (the bands across the stereo field), DIFFUSE, DRIFT (each band's
+     * time wanders on its own), WIDTH (how wide each band is: narrow bands ring)
+     * DEEP: SYNC, DUCK */
+    float T = synced(raw[8], pt->bpm, expmap(p[0], 0.05f, 2.f)) * TFX_SR;
+    int freeze = pt->freeze_dly;
+    float fb = freeze ? 1.f : p[1] * 0.95f, spread = (p[2] * 2.f - 1.f) * 1.6f, tilt = p[3] * 2.f - 1.f;
+    float pan = p[4], diff = p[5] * 0.7f, drift = p[6] * 0.03f, k = 1.f / expmap(p[7], 0.7f, 6.f);
+    float bg[4], gl[4], gr[4], g[4], tot = 0.f;
+    for (int b = 0; b < 4; b++) {
+        float pos = (b - 1.5f) / 1.5f;
+        bg[b] = exp2f(tilt * pos * 1.2f);
+        float pp = pan * (b & 1 ? 1.f : -1.f) * (0.5f + 0.5f * fabsf(pos));
+        gl[b] = sqrtf(0.5f * (1.f - pp)), gr[b] = sqrtf(0.5f * (1.f + pp));
+        g[b] = svf_g(PBAND[b]);
+        tot += bg[b];
+    }
+    float norm = 4.f / tot * (0.9f + 0.6f * (1.f - k)) ;
+    float maxT = (float)(DMEM - TFX_SR) / 2.f;
+    for (int i = 0; i < n; i++) {
+        float x[2] = {l[i], r[i]};
+        float ol = 0.f, orr = 0.f, back[2] = {0.f, 0.f};
+        for (int b = 0; b < 4; b++) {
+            float want = T * exp2f(spread * (b - 1.5f) / 1.5f) * (1.f + drift * wander_tick(&d->pw[b], &d->rng, 0.25f + 0.11f * b));
+            if (want > maxT) want = maxT;
+            if (d->ptime[b] <= 0.f) d->ptime[b] = want;
+            d->ptime[b] += (want - d->ptime[b]) * 0.0002f;
+            for (int c = 0; c < 2; c++) {
+                float y = dly_lin(&d->b[c], d->ptime[b] + 4.f);
+                float v = k * svf_run(&d->psv[c][b], y, g[b], k).bp * norm * bg[b];
+                back[c] += v;
+                ol += v * gl[b] * (c ? 0.3f : 1.f);
+                orr += v * gr[b] * (c ? 1.f : 0.3f);
+            }
+        }
+        for (int c = 0; c < 2; c++) {
+            float v = back[c] * 0.5f;
+            if (diff > 0.01f) v = lerpf(v, ap_run(&d->diff[c][1], ap_run(&d->diff[c][0], v, diff), diff), diff);
+            dly_push(&d->b[c], (freeze ? 0.f : x[c]) + fb * (freeze ? v : softclip(v)));
+        }
+        l[i] = ol * 0.7f;
+        r[i] = orr * 0.7f;
+    }
+}
+
+/* ---------------------------------------------------------------- ERODE */
+static void erode(Delay *d, const float *p, const float *raw, const Patch *pt, float *l, float *r, int n)
+{
+    /* TIME, FEEDBACK, ERODE (how much slower each pass is sampled), GRIT (how many bits each pass
+     * keeps), TONE, DROPOUTS, SPREAD, WOBBLE
+     * DEEP: SYNC, DUCK, HISS (noise each pass adds: old memory) */
+    float T = synced(raw[8], pt->bpm, expmap(p[0], 0.05f, 2.f)) * TFX_SR;
+    int freeze = pt->freeze_dly;
+    float fb = freeze ? 1.f : p[1] * 1.02f;
+    float rate = expmap(1.f - p[2], 1500.f, 48000.f) / TFX_SR;
+    float bits = expmap(1.f - p[3], 3.f, 16.f), q = exp2f(1.f - bits);
+    float lpk = onepole_coef(expmap(p[4], 800.f, 18000.f)), drop = p[5], spread = p[6], wob = p[7] * 0.004f * TFX_SR;
+    float hiss = p[10] * p[10] * 0.01f;
+    if (d->time_s <= 0.f) d->time_s = T;
+    for (int i = 0; i < n; i++) {
+        d->time_s += (T - d->time_s) * 0.0002f;
+        d->wph += 0.37f / TFX_SR; d->wph -= floorf(d->wph);
+        float wo = wob * (0.5f + 0.5f * (0.6f * lfo_sin(d->wph) + 0.4f * wander_tick(&d->ew, &d->rng, 1.7f)));
+        /* dropouts: now and then a stretch of the memory reads back as nothing */
+        if (rng_uni(&d->rng) < drop * drop * 0.0004f) d->etgt = 0.f;
+        else if (d->etgt < 0.5f && rng_uni(&d->rng) < 0.0008f) d->etgt = 1.f;
+        d->egate += (d->etgt - d->egate) * 0.004f;
+        /* the clock: the pass is sampled (and held) slower as ERODE rises */
+        d->eph += rate;
+        int tick = d->eph >= 1.f;
+        if (tick) d->eph -= floorf(d->eph);
+        float x[2] = {l[i], r[i]};
+        for (int c = 0; c < 2; c++) {
+            float y = dly_lin(&d->b[c], d->time_s * (c ? 1.f + 0.5f * spread : 1.f) + wo + 4.f);
+            if (tick) d->eh[c] = q * floorf(y / q + 0.5f);
+            float v = d->eh[c] * d->egate;
+            d->lp[c] += lpk * (v - d->lp[c]);
+            v = d->lp[c];
+            d->ehiss[c] = 0.9f * d->ehiss[c] + 0.1f * rng_bi(&d->rng);
+            dly_push(&d->b[c], (freeze ? 0.f : x[c]) + fb * softclip(v + hiss * d->ehiss[c]));
+            if (c) r[i] = y; else l[i] = y;
+        }
+    }
+}
+
 /* which deep parameter is DUCK (-1: none) */
-static const int DUCK_P[DL_N] = {9, 8, 9, 9, 9, -1, -1, 9};
+static const int DUCK_P[DL_N] = {9, 8, 9, 9, 9, -1, -1, 9, 9, 9};
 
 void delay_process(Delay *d, int algo, const float *p, const float *raw, const Patch *pt, float *l, float *r, int n)
 {
@@ -531,7 +631,9 @@ void delay_process(Delay *d, int algo, const float *p, const float *raw, const P
     case DL_SHIMMER: shimmer(d, p, raw, pt, l, r, n); break;
     case DL_CLOUD: cloud(d, p, raw, pt, l, r, n); break;
     case DL_STUTTER: stutter(d, p, raw, pt, l, r, n); break;
-    default: dub(d, p, raw, pt, l, r, n); break;
+    case DL_DUB: dub(d, p, raw, pt, l, r, n); break;
+    case DL_PRISM: prism(d, p, raw, pt, l, r, n); break;
+    default: erode(d, p, raw, pt, l, r, n); break;
     }
     /* DUCK: the repeats step back while you play, and swell up in the gaps */
     if (duck > 0.001f) {
@@ -642,6 +744,19 @@ static void fmt(int algo, int p, float v, const Patch *pt, char *o, int n)
         if (p == 2) { snprintf(o, n, "%d", 2 + (int)(v * 14.f)); return; }
         if (p == 3) { snprintf(o, n, "%+.1f st", (v * 2.f - 1.f) * 12.f); return; }
         break;
+    case DL_PRISM:
+        if (p == 0) { secs(o, n, expmap(v, 0.05f, 2.f)); return; }
+        if (p == 2) { float sp = (v * 2.f - 1.f); snprintf(o, n, fabsf(sp) < 0.03f ? "TOGETHER" : sp > 0 ? "HIGHS LATE %.0f%%" : "LOWS LATE %.0f%%", fabsf(sp) * 100.f); return; }
+        if (p == 3) { snprintf(o, n, "%+.0f", (v * 2.f - 1.f) * 100.f); return; }
+        if (p == 7) { snprintf(o, n, "Q %.1f", expmap(v, 0.7f, 6.f)); return; }
+        break;
+    case DL_ERODE:
+        if (p == 0) { secs(o, n, expmap(v, 0.05f, 2.f)); return; }
+        if (p == 1) { snprintf(o, n, "%.0f %%", v * 102.f); return; }
+        if (p == 2) { snprintf(o, n, "%.1f kHz", expmap(1.f - v, 1500.f, 48000.f) / 1000.f); return; }
+        if (p == 3) { snprintf(o, n, "%.1f bit", expmap(1.f - v, 3.f, 16.f)); return; }
+        if (p == 4) { snprintf(o, n, "%.0f Hz", expmap(v, 800.f, 18000.f)); return; }
+        break;
     case DL_DUB:
         if (p == 0) { secs(o, n, expmap(v, 0.05f, 1.5f)); return; }
         if (p == 1) { snprintf(o, n, "%.0f %%", v * 120.f); return; }
@@ -655,7 +770,7 @@ static void fmt(int algo, int p, float v, const Patch *pt, char *o, int n)
 const ModInfo delay_info = {
     "DELAY",
     DL_N,
-    {"GRANULAR", "RHYTHM", "REVERSO", "TAPE", "SHIMMER", "CLOUD", "STUTTER", "DUB"},
+    {"GRANULAR", "RHYTHM", "REVERSO", "TAPE", "SHIMMER", "CLOUD", "STUTTER", "DUB", "PRISM", "ERODE"},
     {"a grain cloud from the delay: pitch, spray, reverse",
      "tempo-synced tap patterns, swing, diffusing repeats",
      "forward / reverse heads: repeats flip, smear and swell",
@@ -663,7 +778,9 @@ const ModInfo delay_info = {
      "every repeat climbs an interval, diffused",
      "four wandering echoes that bloom into haze, ducking",
      "beat-repeat: catches slices, pitches and flips them",
-     "dub echo through a morphing resonant filter, runaway"},
+     "dub echo through a morphing resonant filter, runaway",
+     "four bands, four times: every echo smears into its colours",
+     "a failing memory: each repeat crumbles into dust"},
     {
         {"TIME", "FEEDBACK", "PITCH", "DENSITY", "SIZE", "SPRAY", "REVERSE", "SPARKLE", "SYNC", "DUCK", "ENVELOPE", "FB TONE", "DETUNE"},
         {"DIVISION", "FEEDBACK", "PATTERN", "TONE", "SWING", "SPREAD", "WOBBLE", "DIFFUSE", "DUCK", "WOBBLE RATE", "ACCENT"},
@@ -673,6 +790,8 @@ const ModInfo delay_info = {
         {"TIME", "FEEDBACK", "DIFFUSION", "MOD", "TONE", "SPREAD", "BLOOM", "DUCK", "SYNC", "DUCK RELEASE", "WANDER RATE"},
         {"DIVISION", "CHANCE", "REPEATS", "PITCH", "REVERSE", "DECAY", "GATE", "SPREAD", "FADE", "LOOK BACK"},
         {"TIME", "FEEDBACK", "FILTER", "RESO", "TYPE", "DRIVE", "SPREAD", "WOBBLE", "SYNC", "DUCK", "WOBBLE RATE"},
+        {"TIME", "FEEDBACK", "SPREAD", "TILT", "PAN", "DIFFUSE", "DRIFT", "WIDTH", "SYNC", "DUCK"},
+        {"TIME", "FEEDBACK", "ERODE", "GRIT", "TONE", "DROPOUTS", "SPREAD", "WOBBLE", "SYNC", "DUCK", "HISS"},
     },
     {
         {0.55f, 0.45f, 0.75f, 0.55f, 0.6f, 0.4f, 0.3f, 0.35f, 0.f, 0.f, 0.f, 0.5258295f, 0.f},
@@ -683,6 +802,8 @@ const ModInfo delay_info = {
         {0.5f, 0.6f, 0.6f, 0.4f, 0.55f, 0.6f, 0.6f, 0.3f, 0.f, 0.5f, 0.5f},
         {0.35f, 0.35f, 0.3f, 0.5f, 0.2f, 0.6f, 0.9f, 0.5f, 0.3710943f, 0.f},
         {0.55f, 0.6f, 0.4f, 0.35f, 0.3f, 0.35f, 0.6f, 0.2f, 0.f, 0.f, 0.4731974f},
+        {0.55f, 0.55f, 0.75f, 0.5f, 0.7f, 0.3f, 0.3f, 0.35f, 0.f, 0.f},
+        {0.5f, 0.75f, 0.35f, 0.35f, 0.55f, 0.25f, 0.3f, 0.2f, 0.f, 0.f, 0.f},
     },
     0.5f,
     fmt,

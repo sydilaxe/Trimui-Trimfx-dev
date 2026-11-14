@@ -192,6 +192,8 @@ Each runs a look-ahead limiter, and FILTER / CRUSH come from its crush page.
 | CLOUD | **TIME, FEEDBACK, DIFFUSION, MOD**, TONE, SPREAD, BLOOM, DUCK | four cross-coupled wandering echoes that bloom into haze and duck as you play |
 | STUTTER | **DIVISION, CHANCE, REPEATS, PITCH**, REVERSE, DECAY, GATE, SPREAD | a beat-repeat that catches slices on the grid, pitches them and flips them |
 | DUB | **TIME, FEEDBACK, FILTER, RESO**, TYPE, DRIVE, SPREAD, WOBBLE | a dub echo through a filter that morphs from low-pass to band-pass to high-pass |
+| PRISM | **TIME, FEEDBACK, SPREAD, TILT**, PAN, DIFFUSE, DRIFT, WIDTH | the repeats split into four bands, each with its own time: lows late and highs early (or the other way), so each echo smears apart into its colours |
+| ERODE | **TIME, FEEDBACK, ERODE, GRIT**, TONE, DROPOUTS, SPREAD, WOBBLE | a failing digital memory: each pass is sampled slower, keeps fewer bits and drops out now and then, so the repeats crumble into dust |
 
 ### REVERB: late-80s / 90s algorithms
 
@@ -210,6 +212,8 @@ converters' era: 70s (narrow band, few bits), 80s, 90s, then NOW (full band).
 | HALO | **DECAY, SIZE, DAMP, MOD**, PRE-DELAY, COLOR, SHIMMER, INTERVAL | shimmer: every pass climbs an interval |
 | SPRING | **DECAY, TENSION, DAMP, WOBBLE**, PRE-DELAY, COLOR, DRIP, DRIVE | two dispersive springs: drips, wobble, tube driver |
 | INVERSE | **TIME, SHAPE, DAMP**, PRE-DELAY, COLOR, DENSITY, SPREAD | non-linear: swells up (inverse) or is cut off (gated) |
+| TEMPLE | **DECAY, ROOT, DAMP, DRIFT**, PRE-DELAY, COLOR, DIFFUSION, CHORD | a room tuned to a chord (octaves, fifths, minor 7, major 7, sus, whole tone, pelog, cluster) on a root from C1 to C4: the tail rings in harmony |
+| NEBULA | **DECAY, SIZE, DAMP, SCATTER**, PRE-DELAY, COLOR, DENSITY, OCTAVES | a granular reverb: grains scattered from the last seconds, pitch-smeared, now and then an octave, fed back into the cloud |
 
 ## DEEP pages
 
@@ -257,6 +261,8 @@ in the gaps.
 | CLOUD | SYNC, DUCK RELEASE, WANDER RATE |
 | STUTTER | FADE, LOOK BACK (catch the slice 1-4 slices ago) |
 | DUB | SYNC, DUCK, WOBBLE RATE |
+| PRISM | SYNC, DUCK |
+| ERODE | SYNC, DUCK, HISS |
 
 | REVERB | DEEP |
 |---|---|
@@ -269,6 +275,8 @@ in the gaps.
 | HALO | X-OVER, SPIN RATE, DIFFUSION, WINDOW (the shifter's), DUCK, WIDTH |
 | SPRING | LOW CUT, PAIR (the second spring's length), WOBBLE RATE, CHIRP, DUCK, WIDTH |
 | INVERSE | TAPS, JITTER, DUCK, WIDTH |
+| TEMPLE | SPREAD (left and right apart in pitch), DUCK, WIDTH |
+| NEBULA | REVERSE, DIFFUSION, DUCK, WIDTH |
 
 ![A DEEP page](docs/screen-deep.png)
 

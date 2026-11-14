@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-/* REVERB: ten algorithms in the manner of late-80s / 90s studio units.
+/* REVERB: twelve algorithms in the manner of late-80s / 90s studio units.
  *   CONCERT   a Lexicon-style figure-eight tank (after Dattorro's
  *             published plate topology) with "spin and wander" chorus
  *   PLATE     the same tank, smaller, denser and brighter
@@ -19,6 +19,10 @@
  *   SPRING    two dispersive springs: chirping drips, wobble, tube drive
  *   INVERSE   the 80s/90s non-linear programs: a dense tap cloud that swells
  *             up (inverse) or is cut off (gated)
+ *   TEMPLE    a room tuned to a chord: eight combs pitched to the chord's
+ *             notes on a root, then diffused, so the tail rings in harmony
+ *   NEBULA    a granular reverb: grains scattered from the last seconds,
+ *             pitch-smeared (now and then an octave), fed back into the cloud
  * Every algorithm: pre-delay, and COLOR, the converters' era: from a 70s
  * unit's narrow band and few bits, through the 90s, to now. FREEZE (from
  * the patch) closes the input and lets the space ring forever. */
@@ -61,6 +65,14 @@ int verb_init(Verb *v)
     bad |= dly_init(&v->inv, TFX_SR + TFX_SR / 10);
     static const float INVAP[3] = {113, 337, 709};
     for (int i = 0; i < 3; i++) bad |= ap_init(&v->invap[i], 1000, INVAP[i]);
+    for (int c = 0; c < 2; c++) {
+        for (int k = 0; k < 4; k++) bad |= dly_init(&v->tc[c][k], TFX_SR / 8);
+        static const float TDF[3] = {149, 263, 401};
+        for (int k = 0; k < 3; k++) bad |= ap_init(&v->tdf[c][k], 1000, TDF[k] * (1.f + 0.13f * c));
+        bad |= dly_init(&v->nb[c], TFX_SR * 3);
+        bad |= ap_init(&v->ndf[c][0], 800, 241.f + 31.f * c);
+        bad |= ap_init(&v->ndf[c][1], 1600, 677.f + 53.f * c);
+    }
     bad |= bloom_init(&v->bloom, 1.024);
     mv2_init(&v->mv);
     v->size_g = -1.f;
@@ -81,6 +93,12 @@ void verb_free(Verb *v)
     for (int i = 0; i < 3; i++) dly_free(&v->spin[i].d), dly_free(&v->cap[i].d), dly_free(&v->invap[i].d);
     for (int i = 0; i < 16; i++) dly_free(&v->cb[i]);
     dly_free(&v->inv);
+    for (int c = 0; c < 2; c++) {
+        for (int k = 0; k < 4; k++) dly_free(&v->tc[c][k]);
+        for (int k = 0; k < 3; k++) dly_free(&v->tdf[c][k].d);
+        dly_free(&v->nb[c]);
+        dly_free(&v->ndf[c][0].d); dly_free(&v->ndf[c][1].d);
+    }
     bloom_free(&v->bloom);
 }
 
@@ -105,6 +123,15 @@ void verb_reset(Verb *v, int algo)
     for (int i = 0; i < 3; i++) dly_clear(&v->spin[i].d), dly_clear(&v->cap[i].d), dly_clear(&v->invap[i].d);
     for (int i = 0; i < 16; i++) dly_clear(&v->cb[i]), v->cdamp[i] = 0.f;
     dly_clear(&v->inv);
+    for (int c = 0; c < 2; c++) {
+        for (int k = 0; k < 4; k++) dly_clear(&v->tc[c][k]), v->tcl[c][k] = 0.f;
+        for (int k = 0; k < 3; k++) dly_clear(&v->tdf[c][k].d);
+        dly_clear(&v->nb[c]);
+        dly_clear(&v->ndf[c][0].d); dly_clear(&v->ndf[c][1].d);
+        v->nlp[c] = 0.f;
+    }
+    memset(v->ng, 0, sizeof v->ng);
+    v->ngnext = 0.f;
     bloom_reset(&v->bloom);
     mv2_reset(&v->mv);
     v->size_g = -1.f;
@@ -485,6 +512,116 @@ static void inverse(Verb *v, const float *p, int freeze, float *l, float *r, int
     }
 }
 
+/* ---------------------------------------------------------------- TEMPLE */
+static const float CHORD[8][4] = {
+    {0, 12, 24, -12}, {0, 7, 12, 19}, {0, 3, 7, 10}, {0, 4, 7, 11},
+    {0, 5, 7, 14}, {0, 2, 4, 6}, {0, 1, 5, 7}, {0, 1, 2, 3},
+};
+static const char *const CHORDN[8] = {"OCTAVES", "FIFTHS", "MINOR 7", "MAJOR 7", "SUS", "WHOLE TONE", "PELOG", "CLUSTER"};
+static const char *const NOTEN[12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+static float temple_root(float v) { return 32.7032f * exp2f(floorf(v * 36.f + 0.5f) / 12.f); } /* C1 .. C4, in semitones */
+
+static void temple(Verb *v, const float *p, const float *raw, int freeze, float *l, float *r, int n)
+{
+    /* DECAY, ROOT, DAMP, DRIFT (the combs' pitch wanders: a choir of rooms), PRE-DELAY, COLOR,
+     * DIFFUSION (from bare ringing combs to a room), CHORD
+     * DEEP: SPREAD (left and right a little apart in pitch), DUCK, WIDTH */
+    float RT = rt60(p[0], 0.5f, 30.f), root = temple_root(p[1]);
+    float dk = freeze ? 1.f : onepole_coef(expmap(1.f - p[2], 700.f, 16000.f));
+    float drift = p[3] * 0.012f, diff = p[6] * 0.72f, spread = p[8] * 0.012f;
+    const float *ch = CHORD[pstep(raw[7], 8)];
+    float per[2][4], g[2][4], nrm[2][4];
+    for (int c = 0; c < 2; c++)
+        for (int k = 0; k < 4; k++) {
+            float f = root * exp2f(ch[k] / 12.f) * (1.f + (c ? spread : -spread));
+            per[c][k] = clampf(TFX_SR / f, 8.f, TFX_SR / 8.f - 8.f);
+            g[c][k] = freeze ? 1.f : loop_gain(per[c][k] / TFX_SR, RT);
+            nrm[c][k] = sqrtf(1.f - g[c][k] * g[c][k] * 0.999f) * 1.6f;
+        }
+    for (int i = 0; i < n; i++) {
+        float w[4];
+        for (int k = 0; k < 4; k++) w[k] = 1.f + drift * wander_tick(&v->tcw[k], &v->rng, 0.3f + 0.1f * k);
+        float x[2] = {freeze ? 0.f : l[i], freeze ? 0.f : r[i]};
+        for (int c = 0; c < 2; c++) {
+            float acc = 0.f;
+            for (int k = 0; k < 4; k++) {
+                float y = dly_lin(&v->tc[c][k], per[c][k] * w[k]);
+                v->tcl[c][k] += dk * (y - v->tcl[c][k]);
+                dly_push(&v->tc[c][k], x[c] * nrm[c][k] + v->tcl[c][k] * g[c][k]);
+                acc += y;
+            }
+            acc *= 0.5f;
+            for (int k = 0; k < 3; k++) acc = lerpf(acc, ap_run(&v->tdf[c][k], acc, diff), diff > 0.01f ? 1.f : 0.f);
+            if (c) r[i] = acc; else l[i] = acc;
+        }
+    }
+}
+
+/* ---------------------------------------------------------------- NEBULA */
+static void nebula(Verb *v, const float *p, int freeze, float *l, float *r, int n)
+{
+    /* DECAY (how much of the cloud goes round again), SIZE (the grains' length and how far back they
+     * reach), DAMP, SCATTER (pitch and place: from a smooth wash to a shimmering swarm), PRE-DELAY,
+     * COLOR, DENSITY, OCTAVES (how often a grain jumps an octave up or down)
+     * DEEP: REVERSE (how often a grain plays backwards), DIFFUSION (before the cloud), DUCK, WIDTH */
+    float fb = freeze ? 0.98f : p[0] * 0.92f;
+    float len = expmap(p[1], 0.04f, 0.5f) * TFX_SR, reach = len * 4.f;
+    float dk = freeze ? 1.f : onepole_coef(expmap(1.f - p[2], 1500.f, 18000.f));
+    float scat = p[3], dens = expmap(p[6], 4.f, 80.f), octv = p[7] * 0.5f, rev = p[8], dif = p[9] * 0.75f;
+    float over = dens * len / TFX_SR, norm = 1.6f / sqrtf(over > 1.f ? over : 1.f);
+    const float N = (float)(v->nb[0].mask + 1);
+    if (reach > N - len * 2.f - TFX_SR / 10.f) reach = N - len * 2.f - TFX_SR / 10.f;
+    for (int i = 0; i < n; i++) {
+        v->ngnext -= 1.f;
+        if (v->ngnext <= 0.f) {
+            v->ngnext += TFX_SR / dens * (0.5f + rng_uni(&v->rng));
+            for (int k = 0; k < NEB_GRAINS; k++) {
+                Grain *g = &v->ng[k];
+                if (g->on) continue;
+                float cents = scat * 40.f * rng_bi(&v->rng);
+                float ratio = exp2f(cents / 1200.f);
+                if (rng_uni(&v->rng) < octv) ratio *= rng_uni(&v->rng) < 0.6f ? 2.f : 0.5f;
+                g->len = (int)(len * (0.6f + 0.8f * rng_uni(&v->rng)));
+                int back = rng_uni(&v->rng) < rev;
+                float from = len + reach * (0.15f + 0.85f * scat) * rng_uni(&v->rng) + 64.f;
+                if (!back && ratio > 1.f) from += (ratio - 1.f) * g->len;
+                float pos = (float)v->nb[0].w - from;
+                while (pos < 0.f) pos += N;
+                g->pos = pos;
+                g->rate = back ? -ratio : ratio;
+                g->age = 0;
+                float pan = rng_bi(&v->rng) * (0.3f + 0.7f * scat);
+                g->gl = sqrtf(0.5f * (1.f - pan)) * norm;
+                g->gr = sqrtf(0.5f * (1.f + pan)) * norm;
+                g->on = 1;
+                break;
+            }
+        }
+        float ol = 0.f, orr = 0.f;
+        for (int k = 0; k < NEB_GRAINS; k++) {
+            Grain *g = &v->ng[k];
+            if (!g->on) continue;
+            float w = 0.5f - 0.5f * lfo_sin((float)g->age / (float)g->len + 0.25f);
+            ol += w * g->gl * dly_at(&v->nb[0], g->pos);
+            orr += w * g->gr * dly_at(&v->nb[1], g->pos);
+            g->pos += g->rate;
+            if (g->pos >= N) g->pos -= N;
+            if (g->pos < 0.f) g->pos += N;
+            if (++g->age >= g->len) g->on = 0;
+        }
+        v->nlp[0] += dk * (ol - v->nlp[0]);
+        v->nlp[1] += dk * (orr - v->nlp[1]);
+        float x[2] = {freeze ? 0.f : l[i], freeze ? 0.f : r[i]};
+        for (int c = 0; c < 2; c++) {
+            float in = x[c];
+            if (dif > 0.01f) in = ap_run(&v->ndf[c][1], ap_run(&v->ndf[c][0], in, dif), dif * 0.9f);
+            dly_push(&v->nb[c], in + fb * softclip(v->nlp[c]));
+        }
+        l[i] = v->nlp[0];
+        r[i] = v->nlp[1];
+    }
+}
+
 /* ---------------------------------------------------------------- the frame: pre-delay, COLOR */
 void verb_process(Verb *v, int algo, const float *p, const float *raw, const Patch *pt, float *l, float *r, int n)
 {
@@ -520,7 +657,9 @@ void verb_process(Verb *v, int algo, const float *p, const float *raw, const Pat
     case RV_CLASSIC: classic(v, p, freeze, l, r, n); break;
     case RV_BLOOM: case RV_MIDIVERB: blooms(v, algo, p, raw, freeze, l, r, n); break;
     case RV_SPRING: spring(v, p, freeze, l, r, n); break;
-    default: inverse(v, p, freeze, l, r, n); break;
+    case RV_INVERSE: inverse(v, p, freeze, l, r, n); break;
+    case RV_TEMPLE: temple(v, p, raw, freeze, l, r, n); break;
+    default: nebula(v, p, freeze, l, r, n); break;
     }
     if (era < 0.98f) {
         for (int i = 0; i < n; i++) {
@@ -584,6 +723,9 @@ static void fmt(int algo, int p, float v, const Patch *pt, char *o, int n)
         case RV_INVERSE:
             if (d == 0) { snprintf(o, n, "%d TAPS", 8 + (int)(v * (INV_TAPS - 8) + 0.5f)); return; }
             break;
+        case RV_TEMPLE:
+            if (d == 0) { snprintf(o, n, "+-%.0f cents", v * 0.012f * 1731.f); return; }
+            break;
         }
         snprintf(o, n, "%.0f %%", v * 100.f);
         return;
@@ -626,6 +768,15 @@ static void fmt(int algo, int p, float v, const Patch *pt, char *o, int n)
         if (p == 0) { secs(o, n, expmap(v, 0.5f, 8.f)); return; }
         if (p == 1) { secs(o, n, expmap(v, 0.018f, 0.07f)); return; }
         break;
+    case RV_TEMPLE:
+        if (p == 0) { secs(o, n, expmap(v, 0.5f, 30.f)); return; }
+        if (p == 1) { int st = (int)floorf(v * 36.f + 0.5f); snprintf(o, n, "%s%d  %.0f Hz", NOTEN[st % 12], 1 + st / 12, temple_root(v)); return; }
+        if (p == 7) { snprintf(o, n, "%s", CHORDN[pstep(v, 8)]); return; }
+        break;
+    case RV_NEBULA:
+        if (p == 1) { secs(o, n, expmap(v, 0.04f, 0.5f)); return; }
+        if (p == 6) { snprintf(o, n, "%.0f /s", expmap(v, 4.f, 80.f)); return; }
+        break;
     case RV_INVERSE:
         if (p == 0) { secs(o, n, expmap(v, 0.08f, 0.9f)); return; }
         if (p == 1) { snprintf(o, n, v < 0.1f ? "GATED" : v > 0.9f ? "INVERSE" : "%.0f%% INV", v * 100.f); return; }
@@ -637,7 +788,7 @@ static void fmt(int algo, int p, float v, const Patch *pt, char *o, int n)
 const ModInfo verb_info = {
     "REVERB",
     RV_N,
-    {"CONCERT", "PLATE", "CHAMBER 8X8", "SPACE", "CLASSIC", "BLOOM", "MIDIVERB", "HALO", "SPRING", "INVERSE"},
+    {"CONCERT", "PLATE", "CHAMBER 8X8", "SPACE", "CLASSIC", "BLOOM", "MIDIVERB", "HALO", "SPRING", "INVERSE", "TEMPLE", "NEBULA"},
     {"Lexicon-style figure-8 hall: spin and wander chorus",
      "the same tank, small, dense, bright",
      "early pattern into an 8x8 Hadamard FDN tail",
@@ -647,7 +798,9 @@ const ModInfo verb_info = {
      "the MidiVerb II Bloom programs 45 / 49, exactly",
      "shimmer: every pass climbs an interval",
      "two dispersive springs: drip, wobble, tube drive",
-     "non-linear: swells up (inverse) or cut off (gated)"},
+     "non-linear: swells up (inverse) or cut off (gated)",
+     "a room tuned to a chord: the tail rings in harmony",
+     "granular reverb: a cloud of scattered, pitch-smeared grains"},
     {
         {"DECAY", "SIZE", "DAMP", "MOD", "PRE-DELAY", "COLOR", "BASS", "DIFFUSION", "X-OVER", "SPIN RATE", "WANDER", "TANK DIFF", "", "", "DUCK", "WIDTH"},
         {"DECAY", "SIZE", "DAMP", "MOD", "PRE-DELAY", "COLOR", "BASS", "DIFFUSION", "X-OVER", "SPIN RATE", "WANDER", "TANK DIFF", "", "", "DUCK", "WIDTH"},
@@ -659,6 +812,8 @@ const ModInfo verb_info = {
         {"DECAY", "SIZE", "DAMP", "MOD", "PRE-DELAY", "COLOR", "SHIMMER", "INTERVAL", "X-OVER", "SPIN RATE", "DIFFUSION", "WINDOW", "", "", "DUCK", "WIDTH"},
         {"DECAY", "TENSION", "DAMP", "WOBBLE", "PRE-DELAY", "COLOR", "DRIP", "DRIVE", "LOW CUT", "PAIR", "WOBBLE RATE", "CHIRP", "", "", "DUCK", "WIDTH"},
         {"TIME", "SHAPE", "DAMP", "", "PRE-DELAY", "COLOR", "DENSITY", "SPREAD", "TAPS", "JITTER", "", "", "", "", "DUCK", "WIDTH"},
+        {"DECAY", "ROOT", "DAMP", "DRIFT", "PRE-DELAY", "COLOR", "DIFFUSION", "CHORD", "SPREAD", "", "", "", "", "", "DUCK", "WIDTH"},
+        {"DECAY", "SIZE", "DAMP", "SCATTER", "PRE-DELAY", "COLOR", "DENSITY", "OCTAVES", "REVERSE", "DIFFUSION", "", "", "", "", "DUCK", "WIDTH"},
     },
     {
         {0.6f, 0.55f, 0.45f, 0.4f, 0.04f, 0.6f, 0.45f, 0.7f, 0.4511309f, 0.5956347f, 0.4f, 0.6f, 0.f, 0.f, 0.f, 0.5f},
@@ -671,6 +826,8 @@ const ModInfo verb_info = {
         {0.55f, 0.6f, 0.4f, 0.45f, 0.05f, 0.85f, 0.45f, 0.f, 0.4511309f, 0.5956347f, 0.7f, 0.6346319f, 0.f, 0.f, 0.f, 0.5f},
         {0.45f, 0.4f, 0.4f, 0.3f, 0.f, 0.4f, 0.5f, 0.2f, 0.4241309f, 0.42f, 0.6203548f, 1.f, 0.f, 0.f, 0.f, 0.5f},
         {0.45f, 0.9f, 0.3f, 0.f, 0.f, 0.6f, 0.7f, 0.6f, 1.f, 1.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.5f},
+        {0.55f, 0.4f, 0.45f, 0.3f, 0.02f, 0.85f, 0.6f, 0.15f, 0.3f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.5f},
+        {0.6f, 0.5f, 0.4f, 0.4f, 0.03f, 0.8f, 0.5f, 0.2f, 0.25f, 0.6f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.5f},
     },
     0.5f,
     fmt,

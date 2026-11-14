@@ -87,7 +87,7 @@ void modu_reset(Modu *m, int algo);
 void modu_process(Modu *m, int algo, const float *p, const float *raw, const Patch *pt, float *l, float *r, int n);
 
 /* ------------------------------------------------------------ DELAY */
-enum { DL_GRAIN, DL_RHYTHM, DL_REVERSO, DL_TAPE, DL_SHIMMER, DL_CLOUD, DL_STUTTER, DL_DUB, DL_N };
+enum { DL_GRAIN, DL_RHYTHM, DL_REVERSO, DL_TAPE, DL_SHIMMER, DL_CLOUD, DL_STUTTER, DL_DUB, DL_PRISM, DL_ERODE, DL_N };
 #define GRAINS 32
 typedef struct {
     int on;
@@ -131,6 +131,13 @@ typedef struct {
     /* dub */
     Svf dsv[2];
     float dfb[2];
+    /* prism: four bands, each its own time */
+    Svf psv[2][4];
+    Wander pw[4];
+    float ptime[4];
+    /* erode: the crumbling memory */
+    float eh[2], eph, egate, etgt, ehiss[2];
+    Wander ew;
     /* DUCK (deep): the input's level, the gain */
     float dk_env, dk_g;
 } Delay;
@@ -140,7 +147,8 @@ void delay_reset(Delay *d, int algo);
 void delay_process(Delay *d, int algo, const float *p, const float *raw, const Patch *pt, float *l, float *r, int n);
 
 /* ------------------------------------------------------------ REVERB */
-enum { RV_CONCERT, RV_PLATE, RV_CHAMBER, RV_SPACE, RV_CLASSIC, RV_BLOOM, RV_MIDIVERB, RV_HALO, RV_SPRING, RV_INVERSE, RV_N };
+enum { RV_CONCERT, RV_PLATE, RV_CHAMBER, RV_SPACE, RV_CLASSIC, RV_BLOOM, RV_MIDIVERB, RV_HALO, RV_SPRING, RV_INVERSE, RV_TEMPLE, RV_NEBULA, RV_N };
+#define NEB_GRAINS 24
 #define SPRING_AP 20
 typedef struct {
     Rng rng;
@@ -190,6 +198,16 @@ typedef struct {
     MV2 mv;
     Bq mvlo[2], mvhi[2];
     float mvlo_f, mvhi_f;
+    /* TEMPLE: combs tuned to a chord, then diffused */
+    Dly tc[2][4];
+    float tcl[2][4];
+    Ap tdf[2][3];
+    Wander tcw[4];
+    /* NEBULA: a granular cloud fed back into itself */
+    Dly nb[2];
+    Grain ng[NEB_GRAINS];
+    float ngnext, nlp[2];
+    Ap ndf[2][2];
     /* DUCK (deep): the input's level, the gain */
     float dk_env, dk_g;
 } Verb;
