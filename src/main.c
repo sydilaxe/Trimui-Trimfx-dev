@@ -791,12 +791,12 @@ static void xy_pad(int x, int y, int sz, float bx, float by, float lx, float ly,
 #define KNOB_A0 (0.75f * TFX_PI)   /* 7:30 */
 #define KNOB_SPAN (1.5f * TFX_PI)  /* to 4:30 */
 
-#define PED_W 200
-#define PED_Y 34
-#define PED_H 728
-#define PED_X(k) (8 + (k) * (PED_W + 6))
+#define PED_W 196
+#define PED_Y 36
+#define PED_H 724
+#define PED_X(k) (10 + (k) * (PED_W + 10))
 #define MST_X PED_X(4)
-#define MST_W (W - 6 - MST_X)
+#define MST_W (W - 10 - MST_X)
 
 static void knob_pt(float cx, float cy, float r, float v, float *x, float *y)
 {
@@ -819,9 +819,13 @@ static void make_bg(void)
     if (!bg) return;
     for (int y = 0; y < H; y++)
         for (int x = 0; x < W; x++) {
+            /* a melting orange / pink backdrop, after the photo the boxes sit on */
+            float zig = fabsf(fmodf(y * 0.021f + 40.f, 2.f) - 1.f) * 38.f;           /* zig-zag */
+            float t = (x + zig + 9.f * sinf(y * 0.013f + x * 0.004f)) * 0.012f;
             uint32_t h = hash32((uint32_t)(y * W + x) * 2654435761u);
-            int v = 0x15 + (int)(h & 3);
-            bg[y * W + x] = (uint32_t)(v << 16 | v << 8 | (v + 6));
+            t += ((h & 255) / 255.f - 0.5f) * 0.05f + (((h >> 8) % 7) == 0 ? 0.04f : 0.f); /* the smear */
+            float f = t - floorf(t);
+            bg[y * W + x] = f < 0.42f ? 0xffa516 : f < 0.62f ? 0xff8a0e : f < 0.86f ? 0xf27272 : 0xff9c14;
         }
     for (int k = 0; k < 5; k++) {
         int x0 = PED_X(k), w = k < 4 ? PED_W : MST_W, y0 = PED_Y, h = PED_H, rr = 12;
@@ -889,8 +893,11 @@ static void knob(int cx, int cy, int r, float stored, float lv, uint32_t axc, in
         gfx_disc(cx + (r - 1.5f) * cosf(t), cy + (r - 1.5f) * sinf(t), 1.f, 0x3c3e43);
     }
     gfx_disc(cx, cy, r - 4, 0x26272b);
-    gfx_disc(cx - r * 0.25f, cy - r * 0.3f, r * 0.45f, 0x2c2d32); /* the cap's sheen */
-    gfx_disc(cx, cy, r - 7, 0x232428);
+    gfx_disc(cx, cy, r - 7, 0x1e1f23);
+    /* the gloss: a soft sheen and a bright streak, as on a lacquered cap */
+    gfx_disc(cx - r * 0.2f, cy - r * 0.28f, r * 0.42f, 0x2b2c31);
+    gfx_line(cx - r * 0.55f, cy - r * 0.12f, cx + r * 0.05f, cy - r * 0.42f, r > 20 ? 3.f : 2.f, 0x8d9096);
+    gfx_line(cx + r * 0.1f, cy + r * 0.45f, cx + r * 0.45f, cy + r * 0.3f, 1.5f, 0x4a4c52);
     if (!used) return;
     float px = cx + (r - 3) * cosf(a), py = cy + (r - 3) * sinf(a);
     gfx_line(cx + r * 0.35f * cosf(a), cy + r * 0.35f * sinf(a), px, py, r > 20 ? 3.f : 2.f, 0xf4f4f4);
@@ -987,7 +994,7 @@ static void pedal(int x, int m)
     const ModState *ms = &base.m[m];
     int a = ms->algo, on = !ms->bypass, focused = col == m && !overlay, s = sel[m];
     int y = PED_Y;
-    if (focused) gfx_rect(x - 3, y - 3, PED_W + 6, PED_H + 6, 2, ACCENT);
+    if (focused) gfx_rect(x - 4, y - 4, PED_W + 8, PED_H + 8, 3, 0xffffff);
     char b[64], v[48];
 
     /* the maker and the box's name, stamped across the top */
@@ -1071,7 +1078,7 @@ static void pedal(int x, int m)
 static void master_strip(int x, int w)
 {
     int focused = col == COL_MASTER && !overlay, y = PED_Y;
-    if (focused) gfx_rect(x - 3, y - 3, w + 6, PED_H + 6, 2, ACCENT);
+    if (focused) gfx_rect(x - 4, y - 4, w + 8, PED_H + 8, 3, 0xffffff);
     stamp_c(x + w / 2, y + 10, "TRIMFX", 1, 2);
     stamp_c(x + w / 2, y + 52, "IN  FX  OUT", 0, 0);
     int ry0 = y + 86;
@@ -1123,14 +1130,14 @@ static void master_strip(int x, int w)
 static void draw_top(void)
 {
     char b[96];
-    snprintf(b, sizeof b, "%d  %s", preset_slot + 1, patch_name);
-    fit(b, 330);
-    gfx_text(14, 5, b, 0xe8e8e8, FONT_SMALL);
-    snprintf(b, sizeof b, "%.0f BPM", base.bpm);
-    gfx_text(370, 5, b, 0x9a9ca2, FONT_SMALL);
-    if (!in_dev) gfx_text(480, 5, "NO INPUT", C_BAD, FONT_SMALL);
+    snprintf(b, sizeof b, "%d  %s   %.0f BPM%s", preset_slot + 1, patch_name, base.bpm, in_dev ? "" : "   NO INPUT");
+    int w = gfx_text_w(b, FONT_SMALL) + 20;
+    gfx_fill(10, 5, w, 26, 0x14161a);
+    gfx_text(20, 7, b, in_dev ? 0xf2f2f2 : 0xff8080, FONT_SMALL);
     snprintf(b, sizeof b, "STICKS %s %s%s", stick_matrix ? "MATRIX" : "FOCUS", stick_latch ? "LATCH" : "SPRING", hold_on ? " HELD" : "");
-    text_r(W - 16, 5, b, hold_on ? ACCENT : 0x9a9ca2, FONT_SMALL);
+    w = gfx_text_w(b, FONT_SMALL) + 20;
+    gfx_fill(W - 10 - w, 5, w, 26, 0x14161a);
+    text_r(W - 20, 7, b, hold_on ? ACCENT : 0xf2f2f2, FONT_SMALL);
 }
 
 static void row_box(int x, int y, int w, int here, const char *label, const char *val, uint32_t c, const char *axn, uint32_t axc, float bar)
