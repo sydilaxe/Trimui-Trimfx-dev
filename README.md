@@ -280,6 +280,16 @@ in the gaps.
 - The whole state, including the stick matrix, is kept in `state.txt` and comes back at the next
   start.
 
+## The speaker stays out of it
+
+On an FX send the return must go back to the interface and nowhere else. TrimFX opens the USB
+interface's output by name, not the system's default. If there is no USB output (none plugged in,
+or it is pulled out mid-set), the default output is opened but kept **silent**. The top bar says
+`NO USB OUT: SPEAKER MUTED`, so the internal speaker never plays the effect and the mic never feeds
+it back. To use the speaker or headphones on purpose, choose them in **SETUP > OUTPUT**, or set
+`TFX_AUDIO=internal` in `launch.sh`. An interface whose SDL name lacks "USB" is still recognised:
+TrimFX matches it against the cards the kernel's USB audio driver runs (`/proc/asound/cards`).
+
 ## Installing (MustardOS)
 
 1. Get `TrimFX-mustardos.muxapp` from a release, or build it (`make package`).

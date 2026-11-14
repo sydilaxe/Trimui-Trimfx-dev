@@ -84,6 +84,7 @@ static float ring[RING * 2];
 static atomic_uint ring_w, ring_r;
 static atomic_uint underruns, overruns;
 static atomic_int have_input;
+static atomic_int spk_guard; /* 1: the output fell back to the internal speaker without being asked: silent */
 
 static void flush_denormals(void)
 {
@@ -145,12 +146,48 @@ static void out_cb(void *ud, Uint8 *stream, int len)
         s[i] = (int16_t)(v > 32767.f ? 32767.f : v < -32768.f ? -32768.f : v);
     }
     for (int i = 2 * frames; i < len / 2; i++) s[i] = 0;
+    if (atomic_load_explicit(&spk_guard, memory_order_relaxed)) memset(s, 0, (size_t)len);
     ringleds_audio(s, frames);
     perf_audio_output(s, frames);
     perf_audio_end(t0);
 }
 
-static int is_usb_name(const char *n) { return n && (strcasestr(n, "usb") || strcasestr(n, "uac") || strcasestr(n, "dac")); }
+/* a USB device: its name says so, or it carries the name of a card the kernel's USB audio driver
+ * runs (/proc/asound/cards: " 1 [Device ]: USB-Audio - USB Audio Device"), as interfaces such as a
+ * Scarlett or a Zoom often show only their product name */
+static int is_usb_name(const char *n)
+{
+    if (!n) return 0;
+    if (strcasestr(n, "usb") || strcasestr(n, "uac") || strcasestr(n, "dac")) return 1;
+    FILE *f = fopen("/proc/asound/cards", "r");
+    if (!f) return 0;
+    char line[256];
+    int hit = 0;
+    while (!hit && fgets(line, sizeof line, f)) {
+        if (!strstr(line, "USB-Audio")) continue;
+        char id[64] = "", *a = strchr(line, '['), *b = a ? strchr(a, ']') : NULL, *d = strstr(line, "USB-Audio - ");
+        if (a && b && b - a - 1 < (int)sizeof id) {
+            memcpy(id, a + 1, (size_t)(b - a - 1));
+            id[b - a - 1] = 0;
+            for (int k = (int)strlen(id) - 1; k >= 0 && id[k] == ' '; k--) id[k] = 0;
+            if (strlen(id) >= 3 && strcasestr(n, id)) hit = 1;
+        }
+        if (d) {
+            char *nm = d + strlen("USB-Audio - ");
+            nm[strcspn(nm, "\r\n")] = 0;
+            if (strlen(nm) >= 3 && strcasestr(n, nm)) hit = 1;
+        }
+    }
+    fclose(f);
+    return hit;
+}
+
+/* asked for: a device picked in SETUP, or TFX_AUDIO naming one (or "internal") */
+static int out_asked(void)
+{
+    const char *env = getenv("TFX_AUDIO");
+    return out_pick >= 0 || (env && *env && strcasecmp(env, "auto"));
+}
 
 /* the device to open: a picked one, else what TFX_AUDIO / TFX_INPUT names, else a USB one, else the default */
 static const char *pick(int capture)
@@ -187,6 +224,10 @@ static void audio_open_out(const char *name)
     if (!out_dev && name) name = NULL, out_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
     if (!out_dev) { perf_log("AUDIO", "no output: %s", SDL_GetError()); return; }
     snprintf(out_name, sizeof out_name, "%s", name ? name : "");
+    /* an FX send must not come out of the speaker by surprise (and feed back into the mic) */
+    int guard = !out_asked() && !is_usb_name(name);
+    atomic_store(&spk_guard, guard);
+    if (guard) perf_log("AUDIO", "no USB output: the internal speaker stays silent (choose it in SETUP to hear it)");
     perf_audio_open(rate, have.samples, name);
     perf_log("AUDIO", "out: SDL %s, %d Hz, %d frames, %s", SDL_GetCurrentAudioDriver(), have.freq, have.samples,
              name ? name : "default");
@@ -1603,10 +1644,12 @@ static void screen_led(int cx, int cy, float r, uint32_t c)
 static void draw_top(void)
 {
     char b[96];
-    snprintf(b, sizeof b, "%d  %s   %.0f BPM%s", preset_slot + 1, patch_name, base.bpm, in_dev ? "" : "   NO INPUT");
+    int guard = atomic_load(&spk_guard);
+    snprintf(b, sizeof b, "%d  %s   %.0f BPM%s", preset_slot + 1, patch_name, base.bpm,
+             guard ? "   NO USB OUT: SPEAKER MUTED" : in_dev ? "" : "   NO INPUT");
     int w = gfx_text_w(b, FONT_SMALL) + 20;
     gfx_fill(10, 5, w, 26, 0x14161a);
-    gfx_text(20, 7, b, in_dev ? 0xf2f2f2 : 0xff8080, FONT_SMALL);
+    gfx_text(20, 7, b, in_dev && !guard ? 0xf2f2f2 : 0xff8080, FONT_SMALL);
     /* the Brick Pro's top bar, as lit now */
     gfx_fill(326, 5, 8 * 18 + 12, 26, 0x14161a);
     for (int k = 0; k < 8; k++) screen_led(338 + k * 18, 18, 5.f, led_meter ? 0 : led_bar[k]);
@@ -1699,7 +1742,11 @@ static void draw_overlay(void)
         for (int r = 0; r < NSROW; r++) {
             switch (r) {
             case SR_INPUT: snprintf(lab, sizeof lab, "INPUT"); snprintf(v, sizeof v, "%s", in_dev ? (*in_name ? in_name : "DEFAULT") : "NONE"); break;
-            case SR_OUTPUT: snprintf(lab, sizeof lab, "OUTPUT"); snprintf(v, sizeof v, "%s", *out_name ? out_name : "DEFAULT"); break;
+            case SR_OUTPUT:
+                snprintf(lab, sizeof lab, "OUTPUT");
+                if (atomic_load(&spk_guard)) snprintf(v, sizeof v, "AUTO: NO USB, SPEAKER MUTED");
+                else snprintf(v, sizeof v, "%s%s", out_pick < 0 ? "AUTO: " : "", *out_name ? out_name : "DEFAULT");
+                break;
             case SR_SAVE: snprintf(lab, sizeof lab, "SAVE TO SLOT"); snprintf(v, sizeof v, "%d  (A)", preset_slot + 1); break;
             case SR_LOAD: snprintf(lab, sizeof lab, "LOAD SLOT"); snprintf(v, sizeof v, "%d  (A)", preset_slot + 1); break;
             case SR_FACTORY: { Patch tmp; snprintf(lab, sizeof lab, "FACTORY"); snprintf(v, sizeof v, "%d %s  (A)", factory_pick + 1, patch_factory(&tmp, factory_pick)); } break;
@@ -1713,12 +1760,13 @@ static void draw_overlay(void)
             "FX SEND: plug a USB interface into the top port. Its input is",
             "the send, its output the return. MASTER > DRY off = all wet;",
             "each pedal's MIX goes to 100 % wet. DELAY and REVERB bypass",
-            "with trails. INPUT / OUTPUT: AUTO picks the first USB device.",
+            "with trails. INPUT / OUTPUT: AUTO picks the first USB device;",
+            "with none, the speaker stays silent unless you choose it here.",
         };
-        for (int i = 0; i < 4; i++) gfx_text(x + 24, ry + NSROW * 38 + 20 + i * 24, lines[i], C_DIM, FONT_SMALL);
+        for (int i = 0; i < 5; i++) gfx_text(x + 24, ry + NSROW * 38 + 20 + i * 24, lines[i], C_DIM, FONT_SMALL);
         snprintf(v, sizeof v, "TrimFX %s  %s  buffer %d  underruns %u  overruns %u", TFX_VERSION, is_pro ? "Brick Pro" : "Brick", buffer,
                  atomic_load(&underruns), atomic_load(&overruns));
-        gfx_text(x + 24, ry + NSROW * 38 + 130, v, C_DIM, FONT_SMALL);
+        gfx_text(x + 24, ry + NSROW * 38 + 150, v, C_DIM, FONT_SMALL);
         return;
     }
     /* STICKS: the matrix on the left, the sticks on the right */
@@ -1988,6 +2036,15 @@ int main(int argc, char **argv)
             MidiEv me[64];
             int nm = midi_poll(me, 64);
             for (int i = 0; i < nm; i++) midi_event(&me[i]);
+        }
+        {
+            static int last_guard = -1;
+            int g = atomic_load(&spk_guard);
+            if (g != last_guard) {
+                if (g) toast("NO USB OUTPUT: SPEAKER MUTED");
+                else if (last_guard == 1) toast("OUTPUT: %s", *out_name ? out_name : "DEFAULT");
+                last_guard = g;
+            }
         }
         repeats();
         build_live(dt);

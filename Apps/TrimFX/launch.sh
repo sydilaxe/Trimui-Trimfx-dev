@@ -18,6 +18,7 @@ export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/lib"
 # export TFX_BUFFER=256         # lower latency (512 by default; 1024 if it crackles)
 # export TFX_AUDIO=internal     # output: the headphones, not the USB interface
 # export TFX_AUDIO=Scarlett     # output: the device whose name has this in it
+# export TFX_AUDIO=internal     # output: the speaker / headphones (by default they stay silent with no USB output)
 # export TFX_INPUT=Scarlett     # input: the same, for the capture side
 # export TFX_JOYMAP=A=1,B=0     # another firmware's button numbers
 # export TFX_LEDS=0             # leave the LEDs alone
