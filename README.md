@@ -54,7 +54,8 @@ at once. On the Brick Pro, the stick rings light up as you push.
 
 Everything is on one screen: a board of raw-aluminium boxes with hand-stamped lettering, in signal order:
 - **Four pedals**: TONE, MOD, DELAY and REVERB.
-- **A master box**: IN and OUT gain, DRY, TEMPO, ORDER and PRESET, the IN / OUT lights and the two joysticks.
+- **A master box**: IN and OUT gain, DRY, TEMPO, ORDER and PRESET, the IN / OUT lights, three mini toggles
+  for the sticks (M matrix, L latch, H hold) and the two joysticks.
 
 Each pedal has:
 - **four big knobs**: the PERFORM set, on the sticks
@@ -62,7 +63,8 @@ Each pedal has:
 - a big **ALGORITHM** selector knob, with a punched dot for each position
 - a **MIX** knob
 - a **Dymo-tape readout** of what you are turning
-- an **LED**: red when on, dark when bypassed, blue when frozen
+- an amber **LED** with a ribbed lens: lit when on, dark when bypassed, blue when frozen
+- on DELAY and REVERB, a mini **F toggle** that shows FREEZE (L3 / R3)
 - a chrome **footswitch**
 
 Each knob's pointer shows the live value. A punched dot on the metal marks the stored setting, and

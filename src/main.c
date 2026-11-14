@@ -819,13 +819,9 @@ static void make_bg(void)
     if (!bg) return;
     for (int y = 0; y < H; y++)
         for (int x = 0; x < W; x++) {
-            /* a melting orange / pink backdrop, after the photo the boxes sit on */
-            float zig = fabsf(fmodf(y * 0.021f + 40.f, 2.f) - 1.f) * 38.f;           /* zig-zag */
-            float t = (x + zig + 9.f * sinf(y * 0.013f + x * 0.004f)) * 0.012f;
             uint32_t h = hash32((uint32_t)(y * W + x) * 2654435761u);
-            t += ((h & 255) / 255.f - 0.5f) * 0.05f + (((h >> 8) % 7) == 0 ? 0.04f : 0.f); /* the smear */
-            float f = t - floorf(t);
-            bg[y * W + x] = f < 0.42f ? 0xffa516 : f < 0.62f ? 0xff8a0e : f < 0.86f ? 0xf27272 : 0xff9c14;
+            int v = 0x17 + (int)(h & 3);                     /* the board: dark, faintly grainy */
+            bg[y * W + x] = (uint32_t)(v << 16 | v << 8 | (v + 5));
         }
     for (int k = 0; k < 5; k++) {
         int x0 = PED_X(k), w = k < 4 ? PED_W : MST_W, y0 = PED_Y, h = PED_H, rr = 12;
@@ -884,8 +880,10 @@ static void knob(int cx, int cy, int r, float stored, float lv, uint32_t axc, in
     gfx_disc(cx + 2, cy + 3, r + 1, 0x7d7f82); /* its shadow on the metal */
     /* the pointer nub */
     float a = KNOB_A0 + KNOB_SPAN * (used ? lv : 0.5f);
-    float tip[6] = {cx + (r + 9) * cosf(a), cy + (r + 9) * sinf(a), cx + r * cosf(a - 0.3f), cy + r * sinf(a - 0.3f),
-                    cx + r * cosf(a + 0.3f), cy + r * sinf(a + 0.3f)};
+    /* the teardrop: the cap tapers into its pointer */
+    float tip[6] = {cx + (r + 12) * cosf(a), cy + (r + 12) * sinf(a), cx + (r - 2) * cosf(a - 0.62f), cy + (r - 2) * sinf(a - 0.62f),
+                    cx + (r - 2) * cosf(a + 0.62f), cy + (r - 2) * sinf(a + 0.62f)};
+    gfx_tri(tip[0] + 2, tip[1] + 3, tip[2] + 2, tip[3] + 3, tip[4] + 2, tip[5] + 3, 0x7d7f82);
     gfx_tri(tip[0], tip[1], tip[2], tip[3], tip[4], tip[5], 0x1b1c1f);
     gfx_disc(cx, cy, r, 0x1b1c1f);
     for (int i = 0; i < 48; i++) { /* the knurling */
@@ -904,13 +902,35 @@ static void knob(int cx, int cy, int r, float stored, float lv, uint32_t axc, in
     if (fabsf(lv - stored) > 0.004f) gfx_disc(cx + (r + 13) * cosf(a), cy + (r + 13) * sinf(a), 3.5f, axc);
 }
 
-/* the LED in its black bezel */
+/* the LED: a ribbed lens in its bezel, lit or dark */
 static void led(int cx, int cy, uint32_t c, int lit)
 {
-    gfx_disc(cx, cy, 11.f, 0x101114);
-    gfx_ring(cx, cy, 11.f, 2.f, 0x3a3c40);
-    gfx_disc(cx, cy, 6.f, lit ? c : gfx_mix(0x101114, c, 0.18f));
-    if (lit) { gfx_ring(cx, cy, 8.f, 2.f, gfx_mix(0x101114, c, 0.55f)); gfx_disc(cx - 2, cy - 2, 2.f, 0xffffff); }
+    gfx_disc(cx + 1, cy + 2, 13.f, 0x7d7f82);
+    gfx_disc(cx, cy, 13.f, 0x2a2b2e);
+    uint32_t lens = lit ? c : gfx_mix(0x1c1d20, c, 0.22f);
+    gfx_disc(cx, cy, 11.f, lens);
+    for (int i = 3; i <= 9; i += 3) gfx_ring(cx, cy, (float)i, 1.f, gfx_mix(lens, lit ? 0xffffff : 0x000000, 0.25f));
+    if (lit) gfx_ring(cx, cy, 14.f, 2.f, gfx_mix(0x9a9c9f, c, 0.5f));
+    gfx_disc(cx - 3, cy - 4, 2.f, lit ? 0xffffff : 0x8a8c90);
+}
+
+/* a mini toggle on its nut: lever up (1) or down (0), the letter beside it, 1 and 0 stamped */
+static void toggle(int cx, int cy, const char *letter, int up, int selected)
+{
+    if (selected) gfx_rect(cx - 30, cy - 44, 52, 88, 2, ACCENT);
+    stamp_c(cx, cy - 44, "1", 0, 0);
+    stamp_c(cx, cy + 22, "0", 0, 0);
+    stamp(cx - 26, cy - 11, letter, 0, 0);
+    float hx[12];
+    for (int i = 0; i < 6; i++) hx[2 * i] = cx + 13 * cosf(i * TFX_PI / 3 + 0.5f), hx[2 * i + 1] = cy + 13 * sinf(i * TFX_PI / 3 + 0.5f);
+    gfx_poly(hx, 6, 0x9fa1a4);
+    gfx_ring(cx, cy, 12.f, 1.f, 0x6a6c70);
+    gfx_disc(cx, cy, 8.f, 0xc9cbce);
+    gfx_disc(cx, cy, 5.f, 0x55575b);
+    float ty = up ? cy - 17 : cy + 17;
+    gfx_line(cx + 1, cy + 1, cx + 1, ty + 1, 5.f, 0x55575b);
+    gfx_line(cx, cy, cx, ty, 5.f, 0xe6e7e9);
+    gfx_disc(cx, ty, 4.5f, 0xf6f7f8);
 }
 
 /* a chrome footswitch on its nut */
@@ -994,7 +1014,7 @@ static void pedal(int x, int m)
     const ModState *ms = &base.m[m];
     int a = ms->algo, on = !ms->bypass, focused = col == m && !overlay, s = sel[m];
     int y = PED_Y;
-    if (focused) gfx_rect(x - 4, y - 4, PED_W + 8, PED_H + 8, 3, 0xffffff);
+    if (focused) gfx_rect(x - 4, y - 4, PED_W + 8, PED_H + 8, 3, ACCENT);
     char b[64], v[48];
 
     /* the maker and the box's name, stamped across the top */
@@ -1064,10 +1084,10 @@ static void pedal(int x, int m)
 
     /* the LED, the footswitch, the serial */
     int frozen = (m == M_DELAY && base.freeze_dly) || (m == M_VERB && base.freeze_verb);
-    led(x + 146, y + 622, frozen ? 0x4fb8ff : 0xff2b1a, on || frozen);
+    led(x + 146, y + 622, frozen ? 0x4fb8ff : 0xffa21a, on || frozen);
     footswitch(x + 146, y + 676, !on);
-    stamp(x + 18, y + 668, CODE[m], 0, 2);
-    if (frozen) stamp(x + 18, y + 620, "FROZEN", 0, 1);
+    stamp(x + 16, y + 694, CODE[m], 0, 2);
+    if (m == M_DELAY || m == M_VERB) toggle(x + 58, y + 640, "F", frozen, 0); /* FREEZE: L3 / R3 */
     else if (!on) stamp(x + 18, y + 620, "BYPASS", 0, 1);
     /* the level, a thin bar under the readout */
     float t = clampf((lin2db(vu_mod[m] + 1e-9f) + 48.f) / 48.f, 0.f, 1.f);
@@ -1078,7 +1098,7 @@ static void pedal(int x, int m)
 static void master_strip(int x, int w)
 {
     int focused = col == COL_MASTER && !overlay, y = PED_Y;
-    if (focused) gfx_rect(x - 4, y - 4, w + 8, PED_H + 8, 3, 0xffffff);
+    if (focused) gfx_rect(x - 4, y - 4, w + 8, PED_H + 8, 3, ACCENT);
     stamp_c(x + w / 2, y + 10, "TRIMFX", 1, 2);
     stamp_c(x + w / 2, y + 52, "IN  FX  OUT", 0, 0);
     int ry0 = y + 86;
@@ -1110,21 +1130,26 @@ static void master_strip(int x, int w)
     gfx_fill(x + w / 2 - tw / 2, ny + 26, tw, 24, 0x14161a);
     text_c(x + w / 2, ny + 27, nm, 0xf2f2f2, FONT_SMALL);
     /* the two joysticks: where the sticks are, and what they move */
+    /* the sticks' three toggles: M matrix, L latch, H hold (B, X, Y) */
+    int tyy = ny + 108;
+    toggle(x + w / 2 - 50, tyy, "M", stick_matrix, 0);
+    toggle(x + w / 2 + 6, tyy, "L", stick_latch, 0);
+    toggle(x + w / 2 + 62, tyy, "H", hold_on, 0);
     float av[NAX];
     axes(av);
-    int m = focus_mod, a = base.m[m].algo, sz = w - 62;
+    int m = focus_mod, a = base.m[m].algo, sz = 88;
     for (int s = 0; s < 2; s++) {
-        int cy = ny + 66 + sz / 2 + s * (sz + 42);
+        int cy = tyy + 54 + sz / 2 + s * (sz + 30);
         joystick(x + w / 2, cy, sz, av[2 * s], av[2 * s + 1], stick_matrix ? 0x8a8c90 : AXCOL[2 * s]);
         char lab[40];
         if (stick_matrix) snprintf(lab, sizeof lab, "%s MATRIX", s ? "R" : "L");
         else snprintf(lab, sizeof lab, "%.5s/%.5s", eng_info(m)->pname[a][2 * s], eng_info(m)->pname[a][2 * s + 1]);
-        stamp_c(x + w / 2, cy + sz / 2 + 8, lab, 0, 0);
+        stamp_c(x + w / 2, cy + sz / 2 + 3, lab, 0, 0);
     }
     /* the levels: a light each side of the maker's name, in and out */
     float li = fmaxf(vu_in[0], vu_in[1]), lo = fmaxf(vu_out[0], vu_out[1]);
-    led(x + 18, y + 62, li > 0.9f ? 0xff2b1a : 0x43e05a, li > 0.01f);
-    led(x + w - 18, y + 62, lo > 0.9f ? 0xff2b1a : 0x43e05a, lo > 0.01f);
+    led(x + 18, y + 62, li > 0.9f ? 0xff2b1a : 0xffa21a, li > 0.01f);
+    led(x + w - 18, y + 62, lo > 0.9f ? 0xff2b1a : 0xffa21a, lo > 0.01f);
 }
 
 static void draw_top(void)
