@@ -15,7 +15,8 @@
 #include <stdint.h>
 
 enum { M_TONE, M_MOD, M_DELAY, M_VERB, NMOD };
-#define NPARAM 8
+#define NPARAM 16  /* 0-7 on the board (0-3 on the sticks), 8-15 on the DEEP page */
+#define NBOARD 8
 #define MAXALGO 10
 #define NORDER 6
 
@@ -58,6 +59,20 @@ static inline int pstep(float v, int n)
 {
     int i = (int)(v * (float)n);
     return i < 0 ? 0 : i >= n ? n - 1 : i;
+}
+
+/* tempo sync for a rate: FREE (the free rate), or one cycle per bar / note value */
+#define NSYNC 10
+static inline float sync_hz(float raw, float bpm, float free_hz)
+{
+    static const float B[NSYNC] = {0.f, 16.f, 8.f, 4.f, 2.f, 1.f, 0.5f, 0.25f, 2.f / 3.f, 1.f / 3.f}; /* beats a cycle */
+    int s = pstep(raw, NSYNC);
+    return s ? (bpm > 1.f ? bpm : 120.f) / 60.f / B[s] : free_hz;
+}
+static inline const char *sync_name(float v)
+{
+    static const char *const N[NSYNC] = {"FREE", "4 BARS", "2 BARS", "1 BAR", "1/2", "1/4", "1/8", "1/16", "1/4 T", "1/8 T"};
+    return N[pstep(v, NSYNC)];
 }
 
 void patch_default(Patch *p);

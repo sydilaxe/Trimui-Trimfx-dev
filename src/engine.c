@@ -72,7 +72,7 @@ static void setp(Patch *p, int m, int algo, float mix, const float *v)
     p->m[m].algo = algo;
     p->m[m].mix = mix;
     if (v)
-        for (int k = 0; k < NPARAM; k++)
+        for (int k = 0; k < NBOARD; k++) /* the presets set the board's eight; DEEP stays at its defaults */
             if (v[k] >= 0.f) p->m[m].p[algo][k] = v[k];
 }
 

@@ -25,7 +25,7 @@ typedef struct {
     Wander ww, dw;
     Svf sv[2];
     Bq bq[2][3];
-    float bqp[3];
+    float bqp[3], bqf[3], bump;
 } Tone;
 int tone_init(Tone *t);
 void tone_free(Tone *t);
@@ -44,13 +44,14 @@ typedef struct {
     Rng rng;
     /* triple resonator (PS-3100 style) */
     Svf rs[3];
-    float rph, rsh[3], rsh_t[3];
+    float rph, rsh[3], rsh_t[3], renv;
     Wander rw[3];
     /* barberpole phaser */
     float bph;                                     /* sweep phase 0..1 */
     float bz[2][BARBER_VOICES][BARBER_STAGES];     /* first-order all-pass states */
     float bfb[2][BARBER_VOICES];
     float bcoef[2][BARBER_VOICES];
+    float bfl[2][BARBER_VOICES];
     Wander bw;
     /* spiral frequency shifter */
     float hx[2][2][4][2], hy[2][2][4][2];          /* [ch][path][stage][z1,z2] */
@@ -61,7 +62,7 @@ typedef struct {
     float slfo;
     /* formant choir */
     Svf fs[2][3];
-    float fph;
+    float fph, cenv;
     Wander fw[2];
     /* drift ensemble */
     Dly edl[2];
@@ -130,6 +131,8 @@ typedef struct {
     /* dub */
     Svf dsv[2];
     float dfb[2];
+    /* DUCK (deep): the input's level, the gain */
+    float dk_env, dk_g;
 } Delay;
 int delay_init(Delay *d);
 void delay_free(Delay *d);
@@ -187,6 +190,8 @@ typedef struct {
     MV2 mv;
     Bq mvlo[2], mvhi[2];
     float mvlo_f, mvhi_f;
+    /* DUCK (deep): the input's level, the gain */
+    float dk_env, dk_g;
 } Verb;
 int verb_init(Verb *v);
 void verb_free(Verb *v);

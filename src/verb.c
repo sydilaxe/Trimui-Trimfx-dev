@@ -128,13 +128,17 @@ static void tank(Verb *v, int algo, const float *p, const float *raw, int freeze
     float RT = rt60(p[0], rlo, rhi);
     float cut = expmap(1.f - p[2], 1200.f, 18000.f), dk = freeze ? 1.f : onepole_coef(cut);
     float mod = p[3] * 28.f;
-    float bass = algo == RV_HALO ? 1.2f : expmap(p[6], 0.5f, 2.5f);
-    float diff = algo == RV_HALO ? 0.7f : p[7];
+    /* DEEP: X-OVER (where BASS takes over), SPIN RATE; CONCERT / PLATE: WANDER (random against
+     * regular), TANK DIFF (the tank's second all-passes); HALO: DIFFUSION, WINDOW (the shifter's) */
+    int halo = algo == RV_HALO;
+    float bass = halo ? 1.2f : expmap(p[6], 0.5f, 2.5f);
+    float diff = halo ? p[10] : p[7];
+    float wand = halo ? 0.4f : p[10], spin = expmap(p[9], 0.1f, 4.f);
     float gin1 = lerpf(0.45f, algo == RV_PLATE ? 0.82f : 0.75f, diff), gin2 = gin1 * 0.83f;
-    float gd1 = lerpf(0.45f, algo == RV_PLATE ? 0.78f : 0.7f, diff), gd2 = 0.5f;
+    float gd1 = lerpf(0.45f, algo == RV_PLATE ? 0.78f : 0.7f, diff), gd2 = halo ? 0.5f : 0.2f + 0.5f * p[11];
     float shimmer = algo == RV_HALO ? p[6] * 0.75f : 0.f;
     float ratio = algo == RV_HALO ? exp2f(SHI[pstep(raw[7], 5)] / 12.f) : 1.f;
-    float lk = onepole_coef(250.f);
+    float lk = onepole_coef(expmap(p[8], 80.f, 1000.f));
     for (int i = 0; i < n; i++) {
         v->size_g += (size - v->size_g) * 0.0004f;
         float s = v->size_g * K29;
@@ -143,16 +147,16 @@ static void tank(Verb *v, int algo, const float *p, const float *raw, int freeze
         /* HALO: the shifter puts energy back in, so the tank keeps a little less itself */
         float dec = freeze ? 1.f : sqrtf(loop_gain(half, RT)) * (1.f - 0.12f * shimmer);
         float decl = freeze ? 1.f : fminf(sqrtf(loop_gain(half, RT * bass)), 0.9995f);
-        v->tph += 0.9f / TFX_SR;
+        v->tph += spin / TFX_SR;
         v->tph -= floorf(v->tph);
-        float m0 = mod * (0.6f * lfo_sin(v->tph) + 0.4f * wander_tick(&v->tw[0], &v->rng, 0.7f));
-        float m1 = mod * (0.6f * lfo_sin(v->tph + 0.25f) + 0.4f * wander_tick(&v->tw[1], &v->rng, 0.55f));
+        float m0 = mod * ((1.f - wand) * lfo_sin(v->tph) + wand * wander_tick(&v->tw[0], &v->rng, 0.7f));
+        float m1 = mod * ((1.f - wand) * lfo_sin(v->tph + 0.25f) + wand * wander_tick(&v->tw[1], &v->rng, 0.55f));
         float m2 = mod * 0.3f * wander_tick(&v->tw[2], &v->rng, 0.37f);
         float m3 = mod * 0.3f * wander_tick(&v->tw[3], &v->rng, 0.43f);
         float x = freeze ? 0.f : 0.5f * (l[i] + r[i]);
         /* shimmer: two crossfading heads over a 100 ms window */
         if (shimmer > 0.f) {
-            float W = 0.1f * TFX_SR;
+            float W = expmap(p[11], 0.03f, 0.2f) * TFX_SR;
             dly_push(&v->sh, 0.5f * (v->shfb[0] + v->shfb[1]));
             v->shph += (1.f - ratio) / W;
             v->shph -= floorf(v->shph);
@@ -215,7 +219,10 @@ static void chamber(Verb *v, const float *p, const float *raw, int freeze, float
     float size = expmap(p[1], 0.4f, 2.5f);
     if (v->size_g < 0.f) v->size_g = size;
     float RT = rt60(p[0], 0.3f, 25.f);
-    float dk = freeze ? 1.f : onepole_coef(expmap(1.f - p[2], 1500.f, 18000.f)), lk = onepole_coef(200.f);
+    /* DEEP: X-OVER, LOW DECAY (the lows' time against DECAY), DIFFUSION (before the network),
+     * WANDER RATE */
+    float dk = freeze ? 1.f : onepole_coef(expmap(1.f - p[2], 1500.f, 18000.f)), lk = onepole_coef(expmap(p[8], 80.f, 1000.f));
+    float lowm = expmap(p[9], 0.5f, 2.5f), dif = fminf(p[10] * 1.2f, 0.95f), wsc = expmap(p[11], 0.25f, 4.f);
     float mod = p[3] * 14.f, er = p[6] * 1.4f;
     int shape = pstep(raw[7], 4);
     float ems[12], eg[12], ep[12];
@@ -224,7 +231,7 @@ static void chamber(Verb *v, const float *p, const float *raw, int freeze, float
     for (int i = 0; i < 8; i++) {
         float secs = FDL[i] * 0.001f * size;
         gn[i] = freeze ? 1.f : loop_gain(secs, RT);
-        gl[i] = freeze ? 1.f : fminf(loop_gain(secs, RT * 1.3f), 0.9995f);
+        gl[i] = freeze ? 1.f : fminf(loop_gain(secs, RT * lowm), 0.9995f);
     }
     for (int i = 0; i < n; i++) {
         v->size_g += (size - v->size_g) * 0.0004f;
@@ -242,12 +249,12 @@ static void chamber(Verb *v, const float *p, const float *raw, int freeze, float
         float in[2];
         for (int c = 0; c < 2; c++) {
             float x = xs[c] + (c ? err : erl) * 0.6f;
-            x = ap_run(&v->fdin[c][0], x, 0.6f);
-            in[c] = ap_run(&v->fdin[c][1], x, 0.55f);
+            x = ap_run(&v->fdin[c][0], x, dif);
+            in[c] = ap_run(&v->fdin[c][1], x, dif * 0.9167f);
         }
         float y[8];
         for (int k = 0; k < 8; k++) {
-            float md = k < 4 ? mod * wander_tick(&v->fw[k], &v->rng, 0.3f + 0.17f * k) : 0.f;
+            float md = k < 4 ? mod * wander_tick(&v->fw[k], &v->rng, (0.3f + 0.17f * k) * wsc) : 0.f;
             float z = dly_lin(&v->fd[k], FDL[k] * 0.001f * TFX_SR * v->size_g + md + 16.f);
             v->fdamp[k] += dk * (z - v->fdamp[k]);
             v->flow[k] += lk * (v->fdamp[k] - v->flow[k]);
@@ -282,6 +289,8 @@ static const char *const SPN[4] = {"SPACE", "ECHO-VERB", "GOLDEN", "CLUSTER"};
 
 static void space(Verb *v, const float *p, const float *raw, int freeze, float *l, float *r, int n)
 {
+    /* DEEP: WANDER RATE, DRIVE (the loop's saturation) */
+    float wsc = expmap(p[8], 0.25f, 4.f), sdrive = expmap(p[9], 1.f, 6.f);
     int mode = pstep(raw[6], 4);
     float size = expmap(p[1], 0.4f, 2.f);
     if (v->size_g < 0.f) v->size_g = size;
@@ -299,14 +308,14 @@ static void space(Verb *v, const float *p, const float *raw, int freeze, float *
         float x = freeze ? 0.f : 0.5f * (l[i] + r[i]);
         for (int k = 0; k < 3; k++) x = ap_run(&v->spin[k], x, dens);
         float acc = 0.f, ol = 0.f, orr = 0.f;
-        float w0 = wander_tick(&v->sw[0], &v->rng, 0.6f) * mod, w1 = wander_tick(&v->sw[1], &v->rng, 1.1f) * mod;
+        float w0 = wander_tick(&v->sw[0], &v->rng, 0.6f * wsc) * mod, w1 = wander_tick(&v->sw[1], &v->rng, 1.1f * wsc) * mod;
         for (int k = 0; k < 8; k++) {
             float t = dly_lin(&v->sp, SPT[mode][k] * 0.001f * TFX_SR * v->size_g + (k & 1 ? w0 : w1) * (0.3f + 0.1f * k) + 2.f);
             acc += SG[k] * t;
             if (k & 1) orr += t * (0.6f + 0.05f * k); else ol += t * (0.6f + 0.05f * k);
         }
         v->splp += dk * (acc * 0.125f - v->splp);
-        v->spfb = softclip(v->splp * g * 8.f / 8.f);
+        v->spfb = softclip(v->splp * g * sdrive) / sdrive;
         dly_push(&v->sp, x + v->spfb * (freeze ? 1.f : 1.f) * 1.f);
         l[i] = ol * 0.6f;
         r[i] = orr * 0.6f;
@@ -327,6 +336,9 @@ static void classic(Verb *v, const float *p, int freeze, float *l, float *r, int
 {
     /* RE-04: room size 0..1 scales every comb by 32^room; "damping" sets the combs'
      * feedback on a log-log curve; hi-damp sweeps a one-pole from 20 kHz down 2 decades */
+    /* DEEP: WANDER RATE, DIFFUSER (the three all-passes' gain), STEREO (RE-04's L / R tap gains
+     * against a mono sum) */
+    float wrate = expmap(p[8], 0.1f, 2.5f), capg = p[9] * 0.8f, ster = p[10];
     float room = p[1];
     if (v->size_g < 0.f) v->size_g = room;
     const float gmax = 0.98f, gmin = 0.40f, alpha = -log10f(gmax), ratio = -log10f(gmin) / alpha;
@@ -349,16 +361,17 @@ static void classic(Verb *v, const float *p, int freeze, float *l, float *r, int
             err += dly_tap(&v->cer[1], (uint32_t)(CER_D[t] * TFX_SR)) * CER_G[t];
         }
         float a = xl + xr + 6e-8f * rng_bi(&v->rng);
-        for (int k = 0; k < 3; k++) a = ap_run(&v->cap[k], a, 0.6f);
-        float w = mod > 0.f ? mod * wander_tick(&v->cw, &v->rng, 0.5f) : 0.f;
+        for (int k = 0; k < 3; k++) a = ap_run(&v->cap[k], a, capg);
+        float w = mod > 0.f ? mod * wander_tick(&v->cw, &v->rng, wrate) : 0.f;
         float ol = 0.f, orr = 0.f;
         for (int c = 0; c < 16; c++) {
             float len = CB_D[c] * scale * TFX_SR + ((c & 3) == 0 ? w : 0.f);
             float z = dly_lin(&v->cb[c], len < 2.f ? 2.f : len);
             v->cdamp[c] = v->cdamp[c] * (1.f - ha) + z * ha;
             dly_push(&v->cb[c], a + v->cdamp[c] * rc);
-            ol += z * CB_L[c];
-            orr += z * CB_R[c];
+            float mono = 0.5f * (CB_L[c] + CB_R[c]);
+            ol += z * lerpf(mono, CB_L[c], ster);
+            orr += z * lerpf(mono, CB_R[c], ster);
         }
         l[i] = bq_run(&v->clc[0], ol * norm) + erl * erg * 0.5f;
         r[i] = bq_run(&v->clc[1], orr * norm) + err * erg * 0.5f;
@@ -400,20 +413,24 @@ static void blooms(Verb *v, int algo, const float *p, const float *raw, int free
 /* ---------------------------------------------------------------- SPRING */
 static void spring(Verb *v, const float *p, int freeze, float *l, float *r, int n)
 {
+    /* DEEP: LOW CUT, PAIR (the second spring's length against the first), WOBBLE RATE, CHIRP (how
+     * many dispersion stages: the drip's length) */
+    float ratio = 1.f + p[9] * 0.5f, wrate = expmap(p[10], 0.3f, 8.f);
+    int stages = 4 + (int)(p[11] * (SPRING_AP - 4) + 0.5f);
     float RT = rt60(p[0], 0.5f, 8.f);
     float len = expmap(p[1], 0.018f, 0.07f) * TFX_SR;
-    float dk = onepole_coef(expmap(1.f - p[2], 1800.f, 6500.f)), hk = onepole_coef(90.f);
+    float dk = onepole_coef(expmap(1.f - p[2], 1800.f, 6500.f)), hk = onepole_coef(expmap(p[8], 30.f, 400.f));
     float wob = p[3] * 9.f, drip = 0.45f + 0.28f * p[6], drive = 1.f + p[7] * 6.f;
     for (int i = 0; i < n; i++) {
         float x = freeze ? 0.f : 0.5f * (l[i] + r[i]);
         x = softclip(x * drive) / (0.6f + 0.4f * drive); /* the tube driver */
         for (int c = 0; c < 2; c++) {
-            float lc = len * (c ? 1.21f : 1.f);
+            float lc = len * (c ? ratio : 1.f);
             float g = freeze ? 1.f : loop_gain(lc / TFX_SR, RT);
-            float d = dly_lin(&v->spd[c], lc + wob * wander_tick(&v->spw[c], &v->rng, 2.3f) + 4.f);
+            float d = dly_lin(&v->spd[c], lc + wob * wander_tick(&v->spw[c], &v->rng, wrate) + 4.f);
             /* the dispersion: a chain of first-order all-passes, lows arrive late (the chirp) */
             float y = d;
-            for (int k = 0; k < SPRING_AP; k++) {
+            for (int k = 0; k < stages; k++) {
                 float o = drip * y + v->spap[c][k];
                 v->spap[c][k] = y - drip * o;
                 y = o;
@@ -435,11 +452,15 @@ static void inverse(Verb *v, const float *p, int freeze, float *l, float *r, int
     float T = expmap(p[0], 0.08f, 0.9f) * TFX_SR, shape = p[1];
     float dk = onepole_coef(expmap(1.f - p[2], 2000.f, 18000.f));
     float dens = 0.3f + 0.45f * p[6], spread = p[7];
+    /* DEEP: TAPS (8-32: few is grainy, many smooth), JITTER (the taps' irregularity) */
+    int ntap = 8 + (int)(p[8] * (INV_TAPS - 8) + 0.5f);
+    float jit = p[9];
     static const float JIT[INV_TAPS] = {0.1f, 0.7f, 0.3f, 0.9f, 0.2f, 0.5f, 0.8f, 0.4f, 0.6f, 0.0f, 0.75f, 0.35f, 0.15f, 0.95f, 0.55f, 0.25f,
                                         0.65f, 0.05f, 0.85f, 0.45f, 0.3f, 0.7f, 0.1f, 0.9f, 0.5f, 0.2f, 0.8f, 0.4f, 0.6f, 0.0f, 0.75f, 0.35f};
     float gk[INV_TAPS], dt[INV_TAPS], tot = 0.f;
     for (int k = 0; k < INV_TAPS; k++) {
-        float t = ((float)k + JIT[k]) / INV_TAPS;
+        if (k >= ntap) { gk[k] = 0.f; dt[k] = 2.f; continue; }
+        float t = ((float)k + 0.5f + (JIT[k] - 0.5f) * jit) / (float)ntap;
         dt[k] = 2.f + t * T;
         float gated = 1.f - 0.25f * t, inv = t * t;
         gk[k] = lerpf(gated, inv, shape) * (k & 1 ? -1.f : 1.f);
@@ -451,7 +472,7 @@ static void inverse(Verb *v, const float *p, int freeze, float *l, float *r, int
         for (int k = 0; k < 3; k++) x = ap_run(&v->invap[k], x, dens);
         if (!freeze) dly_push(&v->inv, x);
         float ol = 0.f, orr = 0.f;
-        for (int k = 0; k < INV_TAPS; k++) {
+        for (int k = 0; k < ntap; k++) {
             float y = dly_lin(&v->inv, dt[k]) * gk[k];
             float pan = (k & 2 ? 1.f : -1.f) * spread;
             ol += y * (1.f - pan * 0.5f);
@@ -468,6 +489,10 @@ static void inverse(Verb *v, const float *p, int freeze, float *l, float *r, int
 void verb_process(Verb *v, int algo, const float *p, const float *raw, const Patch *pt, float *l, float *r, int n)
 {
     int freeze = pt->freeze_verb;
+    /* DEEP, every algorithm: DUCK (14) and WIDTH (15) */
+    float duck = p[14], width = p[15] * 2.f, lev[MOD_BLOCK];
+    if (duck > 0.001f)
+        for (int i = 0; i < n; i++) lev[i] = 0.5f * (fabsf(l[i]) + fabsf(r[i]));
     /* the per-algorithm parameter slots for pre-delay and COLOR (MIDIVERB has neither) */
     float pre = algo == RV_MIDIVERB ? 0.f : p[4] * 0.5f * TFX_SR;
     float era = algo == RV_MIDIVERB ? 1.f : p[5];
@@ -503,6 +528,23 @@ void verb_process(Verb *v, int algo, const float *p, const float *raw, const Pat
             v->obw_z[1][0] += bk * (r[i] - v->obw_z[1][0]); r[i] = v->obw_z[1][0];
         }
     }
+    if (fabsf(width - 1.f) > 0.01f)
+        for (int i = 0; i < n; i++) {
+            float m = 0.5f * (l[i] + r[i]), s = 0.5f * (l[i] - r[i]) * width;
+            l[i] = m + s;
+            r[i] = m - s;
+        }
+    /* DUCK: the tail steps back while you play and blooms in the gaps */
+    if (duck > 0.001f) {
+        for (int i = 0; i < n; i++) {
+            v->dk_env += (lev[i] - v->dk_env) * (lev[i] > v->dk_env ? 0.01f : 0.0003f);
+            float g = 1.f / (1.f + duck * 16.f * v->dk_env);
+            v->dk_g += (g - v->dk_g) * (g < v->dk_g ? 0.003f : 0.0003f);
+            l[i] *= v->dk_g;
+            r[i] *= v->dk_g;
+        }
+    } else
+        v->dk_g = 1.f, v->dk_env = 0.f;
 }
 
 /* ---------------------------------------------------------------- the UI side */
@@ -511,6 +553,41 @@ static void secs(char *o, int n, float s) { snprintf(o, n, s < 1.f ? "%.0f ms" :
 static void fmt(int algo, int p, float v, const Patch *pt, char *o, int n)
 {
     (void)pt;
+    if (p >= NBOARD) {
+        int d = p - NBOARD;
+        if (d == 6) { snprintf(o, n, v < 0.01f ? "OFF" : "%.0f %%", v * 100.f); return; }
+        if (d == 7) { snprintf(o, n, v < 0.01f ? "MONO" : "%.0f %%", v * 200.f); return; }
+        switch (algo) {
+        case RV_CONCERT: case RV_PLATE: case RV_HALO:
+            if (d == 0) { snprintf(o, n, "%.0f Hz", expmap(v, 80.f, 1000.f)); return; }
+            if (d == 1) { snprintf(o, n, "%.2f Hz", expmap(v, 0.1f, 4.f)); return; }
+            if (algo == RV_HALO && d == 3) { snprintf(o, n, "%.0f ms", expmap(v, 0.03f, 0.2f) * 1000.f); return; }
+            break;
+        case RV_CHAMBER:
+            if (d == 0) { snprintf(o, n, "%.0f Hz", expmap(v, 80.f, 1000.f)); return; }
+            if (d == 1 || d == 3) { snprintf(o, n, "x%.2f", d == 1 ? expmap(v, 0.5f, 2.5f) : expmap(v, 0.25f, 4.f)); return; }
+            break;
+        case RV_SPACE:
+            if (d == 0) { snprintf(o, n, "x%.2f", expmap(v, 0.25f, 4.f)); return; }
+            if (d == 1) { snprintf(o, n, "x%.1f", expmap(v, 1.f, 6.f)); return; }
+            break;
+        case RV_CLASSIC:
+            if (d == 0) { snprintf(o, n, "%.2f Hz", expmap(v, 0.1f, 2.5f)); return; }
+            if (d == 2) { snprintf(o, n, v < 0.02f ? "MONO" : "%.0f %%", v * 100.f); return; }
+            break;
+        case RV_SPRING:
+            if (d == 0) { snprintf(o, n, "%.0f Hz", expmap(v, 30.f, 400.f)); return; }
+            if (d == 1) { snprintf(o, n, "x%.2f", 1.f + v * 0.5f); return; }
+            if (d == 2) { snprintf(o, n, "%.1f Hz", expmap(v, 0.3f, 8.f)); return; }
+            if (d == 3) { snprintf(o, n, "%d STAGES", 4 + (int)(v * (SPRING_AP - 4) + 0.5f)); return; }
+            break;
+        case RV_INVERSE:
+            if (d == 0) { snprintf(o, n, "%d TAPS", 8 + (int)(v * (INV_TAPS - 8) + 0.5f)); return; }
+            break;
+        }
+        snprintf(o, n, "%.0f %%", v * 100.f);
+        return;
+    }
     if (algo == RV_MIDIVERB) {
         if (p == 0) { snprintf(o, n, pstep(v, 2) ? "BLOOM 2 (49)" : "BLOOM 1 (45)"); return; }
         if (p == 1) { snprintf(o, n, "%.0f Hz", expmap(v, 20.f, 1000.f)); return; }
@@ -572,28 +649,28 @@ const ModInfo verb_info = {
      "two dispersive springs: drip, wobble, tube drive",
      "non-linear: swells up (inverse) or cut off (gated)"},
     {
-        {"DECAY", "SIZE", "DAMP", "MOD", "PRE-DELAY", "COLOR", "BASS", "DIFFUSION"},
-        {"DECAY", "SIZE", "DAMP", "MOD", "PRE-DELAY", "COLOR", "BASS", "DIFFUSION"},
-        {"DECAY", "SIZE", "DAMP", "MOD", "PRE-DELAY", "COLOR", "EARLY", "PATTERN"},
-        {"DECAY", "SIZE", "DAMP", "MOD", "PRE-DELAY", "COLOR", "MODE", "DENSITY"},
-        {"DECAY", "ROOM", "HI DAMP", "MOD", "PRE-DELAY", "COLOR", "EARLY", "LOW CUT"},
-        {"DECAY", "SIZE", "DAMP", "", "PRE-DELAY", "COLOR", "DIFFUSION", "TYPE"},
-        {"TYPE", "LOW CUT", "HIGH CUT", "WIDTH", "", "", "", ""},
-        {"DECAY", "SIZE", "DAMP", "MOD", "PRE-DELAY", "COLOR", "SHIMMER", "INTERVAL"},
-        {"DECAY", "TENSION", "DAMP", "WOBBLE", "PRE-DELAY", "COLOR", "DRIP", "DRIVE"},
-        {"TIME", "SHAPE", "DAMP", "", "PRE-DELAY", "COLOR", "DENSITY", "SPREAD"},
+        {"DECAY", "SIZE", "DAMP", "MOD", "PRE-DELAY", "COLOR", "BASS", "DIFFUSION", "X-OVER", "SPIN RATE", "WANDER", "TANK DIFF", "", "", "DUCK", "WIDTH"},
+        {"DECAY", "SIZE", "DAMP", "MOD", "PRE-DELAY", "COLOR", "BASS", "DIFFUSION", "X-OVER", "SPIN RATE", "WANDER", "TANK DIFF", "", "", "DUCK", "WIDTH"},
+        {"DECAY", "SIZE", "DAMP", "MOD", "PRE-DELAY", "COLOR", "EARLY", "PATTERN", "X-OVER", "LOW DECAY", "DIFFUSION", "WANDER RATE", "", "", "DUCK", "WIDTH"},
+        {"DECAY", "SIZE", "DAMP", "MOD", "PRE-DELAY", "COLOR", "MODE", "DENSITY", "WANDER RATE", "DRIVE", "", "", "", "", "DUCK", "WIDTH"},
+        {"DECAY", "ROOM", "HI DAMP", "MOD", "PRE-DELAY", "COLOR", "EARLY", "LOW CUT", "WANDER RATE", "DIFFUSER", "STEREO", "", "", "", "DUCK", "WIDTH"},
+        {"DECAY", "SIZE", "DAMP", "", "PRE-DELAY", "COLOR", "DIFFUSION", "TYPE", "", "", "", "", "", "", "DUCK", "WIDTH"},
+        {"TYPE", "LOW CUT", "HIGH CUT", "WIDTH", "", "", "", "", "", "", "", "", "", "", "DUCK", ""},
+        {"DECAY", "SIZE", "DAMP", "MOD", "PRE-DELAY", "COLOR", "SHIMMER", "INTERVAL", "X-OVER", "SPIN RATE", "DIFFUSION", "WINDOW", "", "", "DUCK", "WIDTH"},
+        {"DECAY", "TENSION", "DAMP", "WOBBLE", "PRE-DELAY", "COLOR", "DRIP", "DRIVE", "LOW CUT", "PAIR", "WOBBLE RATE", "CHIRP", "", "", "DUCK", "WIDTH"},
+        {"TIME", "SHAPE", "DAMP", "", "PRE-DELAY", "COLOR", "DENSITY", "SPREAD", "TAPS", "JITTER", "", "", "", "", "DUCK", "WIDTH"},
     },
     {
-        {0.6f, 0.55f, 0.45f, 0.4f, 0.04f, 0.6f, 0.45f, 0.7f},
-        {0.5f, 0.5f, 0.3f, 0.2f, 0.02f, 0.75f, 0.4f, 0.8f},
-        {0.55f, 0.5f, 0.4f, 0.3f, 0.03f, 0.85f, 0.5f, 0.1f},
-        {0.5f, 0.5f, 0.45f, 0.35f, 0.f, 0.45f, 0.f, 0.4f},
-        {0.65f, 0.55f, 0.35f, 0.15f, 0.04f, 0.7f, 0.5f, 0.2f},
-        {0.6f, 0.5f, 0.5f, 0.f, 0.f, 0.5f, 0.5f, 0.f},
-        {0.f, 0.f, 1.f, 0.67f, 0.f, 0.f, 0.f, 0.f},
-        {0.55f, 0.6f, 0.4f, 0.45f, 0.05f, 0.85f, 0.45f, 0.f},
-        {0.45f, 0.4f, 0.4f, 0.3f, 0.f, 0.4f, 0.5f, 0.2f},
-        {0.45f, 0.9f, 0.3f, 0.f, 0.f, 0.6f, 0.7f, 0.6f},
+        {0.6f, 0.55f, 0.45f, 0.4f, 0.04f, 0.6f, 0.45f, 0.7f, 0.4511309f, 0.5956347f, 0.4f, 0.6f, 0.f, 0.f, 0.f, 0.5f},
+        {0.5f, 0.5f, 0.3f, 0.2f, 0.02f, 0.75f, 0.4f, 0.8f, 0.4511309f, 0.5956347f, 0.4f, 0.6f, 0.f, 0.f, 0.f, 0.5f},
+        {0.55f, 0.5f, 0.4f, 0.3f, 0.03f, 0.85f, 0.5f, 0.1f, 0.3627827f, 0.5936926f, 0.5f, 0.5f, 0.f, 0.f, 0.f, 0.5f},
+        {0.5f, 0.5f, 0.45f, 0.35f, 0.f, 0.45f, 0.f, 0.4f, 0.5f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.5f},
+        {0.65f, 0.55f, 0.35f, 0.15f, 0.04f, 0.7f, 0.5f, 0.2f, 0.5f, 0.75f, 1.f, 0.f, 0.f, 0.f, 0.f, 0.5f},
+        {0.6f, 0.5f, 0.5f, 0.f, 0.f, 0.5f, 0.5f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.5f},
+        {0.f, 0.f, 1.f, 0.67f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.5f},
+        {0.55f, 0.6f, 0.4f, 0.45f, 0.05f, 0.85f, 0.45f, 0.f, 0.4511309f, 0.5956347f, 0.7f, 0.6346319f, 0.f, 0.f, 0.f, 0.5f},
+        {0.45f, 0.4f, 0.4f, 0.3f, 0.f, 0.4f, 0.5f, 0.2f, 0.4241309f, 0.42f, 0.6203548f, 1.f, 0.f, 0.f, 0.f, 0.5f},
+        {0.45f, 0.9f, 0.3f, 0.f, 0.f, 0.6f, 0.7f, 0.6f, 1.f, 1.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.5f},
     },
     0.5f,
     fmt,

@@ -321,12 +321,12 @@ static SDL_Surface *surf;
 enum { COL_TONE, COL_MOD, COL_DELAY, COL_VERB, COL_MASTER, NCOL };
 enum { R_ALGO, R_K1, R_K2, R_K3, R_K4, R_D1, R_D2, R_D3, R_D4, R_MIX, NPROW };
 enum { MR_IN, MR_OUT, MR_DRY, MR_TEMPO, MR_ORDER, MR_SLOT, MR_SETUP, MR_STICKS, NMROW };
-enum { OV_NONE, OV_SETUP, OV_STICKS };
+enum { OV_NONE, OV_SETUP, OV_STICKS, OV_DEEP };
 enum { SR_INPUT, SR_OUTPUT, SR_SAVE, SR_LOAD, SR_FACTORY, SR_MIDI, SR_MIDIMAP, SR_INIT, NSROW };
 #define NXROW (3 + NAX * 2 * 2)
 static int col = COL_MOD, focus_mod = M_MOD;
 static int sel[NCOL] = {R_K1, R_K1, R_K1, R_K1, MR_IN};
-static int overlay, ov_sel[3], ov_scroll[3];
+static int overlay, ov_sel[4], ov_scroll[4];
 static char toast_msg[96];
 static Uint32 toast_until;
 static float sx[2], sy[2];     /* the sticks: x right, y up */
@@ -414,6 +414,15 @@ static int param_used(int m, int k)
 {
     const char *n = eng_info(m)->pname[base.m[m].algo][k];
     return n && *n;
+}
+
+/* the DEEP page of box m: its algorithm's parameters past the board's eight (named ones only) */
+static int deep_rows(int m, int idx[NPARAM - NBOARD])
+{
+    int n = 0;
+    for (int k = NBOARD; k < NPARAM; k++)
+        if (param_used(m, k)) idx[n++] = k;
+    return n;
 }
 
 /* the targets a matrix slot can take: NONE, then per module MIX, P1..P8 */
@@ -508,6 +517,7 @@ static int rows_now(void)
 {
     if (overlay == OV_SETUP) return NSROW;
     if (overlay == OV_STICKS) return NXROW;
+    if (overlay == OV_DEEP) { int idx[NPARAM - NBOARD], n = deep_rows(col, idx); return n ? n : 1; }
     return col == COL_MASTER ? NMROW : NPROW;
 }
 static int *sel_now(void) { return overlay ? &ov_sel[overlay] : &sel[col]; }
@@ -544,6 +554,15 @@ static void adjust(int dir, int big)
         case SR_FACTORY: factory_pick = (factory_pick + dir + NFACTORY) % NFACTORY; break;
         default: break;
         }
+        changed();
+        return;
+    }
+    if (overlay == OV_DEEP) {
+        int idx[NPARAM - NBOARD], nd = deep_rows(col, idx);
+        if (!nd) return;
+        int r = ov_sel[OV_DEEP] < nd ? ov_sel[OV_DEEP] : nd - 1;
+        ModState *ms = &base.m[col];
+        ms->p[ms->algo][idx[r]] = clampf(ms->p[ms->algo][idx[r]] + dir * step, 0.f, 1.f);
         changed();
         return;
     }
@@ -628,12 +647,24 @@ static void press_a(void)
         return;
     }
     if (overlay == OV_STICKS) { adjust(1, 0); return; }
+    if (overlay == OV_DEEP) { /* A: back to the default */
+        int idx[NPARAM - NBOARD], nd = deep_rows(col, idx);
+        if (!nd) return;
+        int r = ov_sel[OV_DEEP] < nd ? ov_sel[OV_DEEP] : nd - 1;
+        ModState *ms = &base.m[col];
+        ms->p[ms->algo][idx[r]] = eng_info(col)->pdef[ms->algo][idx[r]];
+        toast("%s: DEFAULT", eng_info(col)->pname[ms->algo][idx[r]]);
+        changed();
+        return;
+    }
     if (col == COL_MASTER) {
         if (sel[col] == MR_SETUP) overlay = OV_SETUP;
         else if (sel[col] == MR_STICKS) overlay = OV_STICKS;
         else if (sel[col] == MR_SLOT) save_slot(preset_slot);
         return;
     }
+    /* on ALGORITHM: the DEEP page */
+    if (sel[col] == R_ALGO) { overlay = OV_DEEP; ov_sel[OV_DEEP] = 0; ov_scroll[OV_DEEP] = 0; return; }
     /* the footswitch */
     base.m[col].bypass ^= 1;
     toast("%s %s", eng_info(col)->name, base.m[col].bypass ? "BYPASSED" : "ON");
@@ -683,7 +714,8 @@ static void button(BiButton b, int down)
     case BI_LEFT: adjust(-1, 0); break;
     case BI_RIGHT: adjust(+1, 0); break;
     case BI_L1: case BI_R1: case BI_F1: case BI_F2: /* F1 / F2: pages without the shoulder buttons */
-        if (overlay) overlay = overlay == OV_SETUP ? OV_STICKS : OV_SETUP;
+        if (overlay == OV_DEEP) { set_col((col + (b == BI_R1 || b == BI_F2 ? 1 : -1) + NMOD) % NMOD); ov_sel[OV_DEEP] = 0; }
+        else if (overlay) overlay = overlay == OV_SETUP ? OV_STICKS : OV_SETUP;
         else set_col(col + (b == BI_R1 || b == BI_F2 ? 1 : -1));
         break;
     case BI_L2: case BI_R2: {
@@ -807,7 +839,7 @@ static void midimap_load(void)
 static int map_mod(const MidiMap *m, int ch)
 {
     if (m->mod == MM_PAGE) return focus_mod;
-    if (m->mod == MM_CHAN) return ch == 0 ? focus_mod : ch <= NMOD ? ch - 1 : -1;
+    if (m->mod == MM_CHAN) return ch == 0 ? focus_mod : ch <= NMOD ? ch - 1 : ch <= 2 * NMOD ? ch - 1 - NMOD : -1;
     return m->mod;
 }
 
@@ -818,11 +850,15 @@ static void midi_apply(const MidiMap *m, int ch, int val, int rise)
     char b[48];
     switch (m->act) {
     case MA_PARAM: {
-        if (mod < 0 || !param_used(mod, m->arg)) return;
+        /* by channel: 2-5 the boxes' board knobs, 6-9 their DEEP pages; 1 the box on screen (its
+         * DEEP page while that is open) */
+        int k = m->arg;
+        if (m->mod == MM_CHAN && k < NBOARD && (ch > NMOD || (ch == 0 && overlay == OV_DEEP))) k += NBOARD;
+        if (mod < 0 || k >= NPARAM || !param_used(mod, k)) return;
         ModState *ms = &base.m[mod];
-        ms->p[ms->algo][m->arg] = v;
-        eng_info(mod)->fmt(ms->algo, m->arg, v, &base, b, sizeof b);
-        toast("%s %s  %s", eng_info(mod)->name, eng_info(mod)->pname[ms->algo][m->arg], b);
+        ms->p[ms->algo][k] = v;
+        eng_info(mod)->fmt(ms->algo, k, v, &base, b, sizeof b);
+        toast("%s %s  %s", eng_info(mod)->name, eng_info(mod)->pname[ms->algo][k], b);
     } break;
     case MA_MIX:
         if (mod < 0) return;
@@ -896,6 +932,12 @@ static void midi_apply(const MidiMap *m, int ch, int val, int rise)
 static int learn_target(MidiMap *m)
 {
     if (learn_custom) { m->act = learn_act; m->mod = learn_mod; m->arg = learn_arg; return 1; }
+    if (overlay == OV_DEEP) {
+        int idx[NPARAM - NBOARD], nd = deep_rows(col, idx);
+        if (!nd) return 0;
+        m->act = MA_PARAM, m->mod = (signed char)col, m->arg = (signed char)idx[ov_sel[OV_DEEP] < nd ? ov_sel[OV_DEEP] : nd - 1];
+        return 1;
+    }
     m->mod = 0;
     m->arg = 0;
     if (col == COL_MASTER) {
@@ -991,7 +1033,7 @@ static void midi_event(const MidiEv *e)
 static void repeats(void)
 {
     Uint32 now = SDL_GetTicks();
-    if (held[BI_SELECT] && !sel_long && now - sel_down_at > 1000) { sel_long = 1; overlay = OV_NONE; learn_on(!midi_learn); }
+    if (held[BI_SELECT] && !sel_long && now - sel_down_at > 1000) { sel_long = 1; if (overlay != OV_DEEP) overlay = OV_NONE; learn_on(!midi_learn); }
     static const BiButton R[4] = {BI_UP, BI_DOWN, BI_LEFT, BI_RIGHT};
     for (int i = 0; i < 4; i++) {
         BiButton b = R[i];
@@ -1409,7 +1451,7 @@ static void pedal(int x, int m)
     } else if (focused && s == R_MIX)
         snprintf(b, sizeof b, ms->mix >= 0.999f ? "MIX ALL WET" : "MIX %.0f%%", live.m[m].mix * 100.f);
     else if (focused && s == R_ALGO)
-        snprintf(b, sizeof b, "%d/%d %s", a + 1, mi->nalgo, mi->algo[a]);
+        snprintf(b, sizeof b, "%d/%d %s  A:DEEP", a + 1, mi->nalgo, mi->algo[a]);
     else
         snprintf(b, sizeof b, "%s", mi->blurb[a]);
     dymo(x + PED_W / 2, y + 566, b, focused ? 0x14161a : 0x2a2c31);
@@ -1594,8 +1636,55 @@ static void row_box(int x, int y, int w, int here, const char *label, const char
     text_r(x + w - 10, y + 5, v, here ? C_TEXT : C_DIM, FONT_SMALL);
 }
 
+/* the DEEP page: the box's algorithm's own further parameters, as rows */
+static void draw_deep(void)
+{
+    int x = 92, y = 70, w = 840, h = 620, m = col;
+    const ModInfo *mi = eng_info(m);
+    int a = base.m[m].algo;
+    gfx_fill_a(0, 0, W, H, 0x000000, 150);
+    gfx_fill(x, y, w, h, C_BG);
+    gfx_rect(x, y, w, h, 2, MODCOL[m]);
+    /* the four boxes as tabs */
+    for (int k = 0; k < NMOD; k++) {
+        int tx = x + 20 + k * (w - 40) / NMOD, tw = (w - 40) / NMOD - 10;
+        gfx_fill(tx, y + 12, tw, 34, k == m ? gfx_mix(C_BG, MODCOL[k], 0.35f) : C_PANEL);
+        if (k == m) gfx_fill(tx, y + 44, tw, 3, MODCOL[k]);
+        text_c(tx + tw / 2, y + 16, eng_info(k)->name, k == m ? C_TEXT : C_DIM, FONT_SMALL);
+    }
+    char t[96];
+    snprintf(t, sizeof t, "%s  DEEP", mi->algo[a]);
+    gfx_text(x + 24, y + 62, t, C_TEXT, FONT_LARGE);
+    snprintf(t, sizeof t, "%s", mi->blurb[a]);
+    fit(t, w - 48);
+    gfx_text(x + 24, y + 100, t, C_DIM, FONT_SMALL);
+    int idx[NPARAM - NBOARD], nd = deep_rows(m, idx), ry = y + 140;
+    if (!nd) gfx_text(x + 24, ry + 10, "NOTHING DEEPER HERE: ALL OF IT IS ON THE BOARD", C_DIM, FONT_SMALL);
+    if (ov_sel[OV_DEEP] >= nd) ov_sel[OV_DEEP] = nd ? nd - 1 : 0;
+    for (int r = 0; r < nd; r++) {
+        int k = idx[r];
+        char v[64];
+        float val = base.m[m].p[a][k];
+        mi->fmt(a, k, val, &base, v, sizeof v);
+        /* a parameter the sticks move (MATRIX) shows its stick */
+        const char *axn = NULL;
+        uint32_t axc = 0;
+        if (stick_matrix)
+            for (int ax = 0; ax < NAX && !axn; ax++)
+                for (int s2 = 0; s2 < 2; s2++)
+                    if (matrix[ax][s2].mod == m && matrix[ax][s2].param == k) { axn = AXN[ax]; axc = AXCOL[ax]; break; }
+        int dflt = fabsf(val - mi->pdef[a][k]) < 0.004f;
+        char lab[48];
+        snprintf(lab, sizeof lab, "%s%s", mi->pname[a][k], dflt ? "" : " *");
+        row_box(x + 16, ry + r * 44, w - 32, ov_sel[OV_DEEP] == r, lab, v, MODCOL[m], axn, axc, val);
+    }
+    gfx_text(x + 24, y + h - 58, "* changed from the algorithm's default", C_DIM, FONT_SMALL);
+    gfx_text(x + 16, y + h - 30, "F1/F2 box   up/down choose   left/right change   A default   B close", C_DIM, FONT_SMALL);
+}
+
 static void draw_overlay(void)
 {
+    if (overlay == OV_DEEP) { draw_deep(); return; }
     int x = 92, y = 70, w = 840, h = 620;
     gfx_fill_a(0, 0, W, H, 0x000000, 150);
     gfx_fill(x, y, w, h, C_BG);
@@ -1675,7 +1764,7 @@ static void draw(void)
     for (int k = 0; k < 4; k++) pedal(PED_X(k), ord[k]);
     master_strip(MST_X, MST_W);
     if (overlay) draw_overlay();
-    if (midi_learn && !overlay) {
+    if (midi_learn && (!overlay || overlay == OV_DEEP)) {
         MidiMap t = {0, 0, 0, 0, 0, 0};
         char l1[96], l2[96], nm[64], now[64];
         if (learn_target(&t)) {
@@ -1777,12 +1866,14 @@ static void tour(const char *path)
     static const struct { int col, sel, ov; const char *tag; } S[] = {
         {COL_MOD, R_K1, OV_NONE, "board_mod"}, {COL_VERB, R_D2, OV_NONE, "board_verb"}, {COL_MASTER, MR_TEMPO, OV_NONE, "board_master"},
         {COL_MASTER, MR_SETUP, OV_SETUP, "setup"}, {COL_MASTER, MR_STICKS, OV_STICKS, "sticks"},
+        {COL_MOD, R_ALGO, OV_DEEP, "deep_mod"}, {COL_VERB, R_ALGO, OV_DEEP, "deep_verb"}, {COL_DELAY, R_ALGO, OV_NONE, "board_algo"},
     };
     for (unsigned i = 0; i < sizeof S / sizeof *S; i++) {
         set_col(S[i].col);
         sel[col] = S[i].sel;
         overlay = S[i].ov;
         ov_sel[OV_STICKS] = 3;
+        ov_sel[OV_DEEP] = 1;
         build_live(0.f);
         draw();
         shot(path, S[i].tag);

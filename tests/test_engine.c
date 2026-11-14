@@ -141,6 +141,49 @@ int main(int argc, char **argv)
         }
     }
 
+    /* the DEEP parameters at their extremes (all down, all up, then alternating), every algorithm:
+     * finite, in range, still sounding */
+    for (int m = 0; m < NMOD; m++) {
+        const ModInfo *mi = eng_info(m);
+        for (int a = 0; a < mi->nalgo; a++)
+            for (int corner = 0; corner < 3; corner++) {
+                Patch p;
+                patch_default(&p);
+                for (int k = 0; k < NMOD; k++) p.m[k].bypass = k != m;
+                p.m[m].algo = a;
+                p.m[m].mix = 1.f;
+                for (int k = NBOARD; k < NPARAM; k++) p.m[m].p[a][k] = corner == 2 ? (float)(k & 1) : (float)corner;
+                engine_reset(e);
+                for (int i = 0; i < play; i += 256) engine_process(e, &p, in + 2 * i, out + 2 * i, play - i < 256 ? play - i : 256);
+                float pk = 0.f;
+                int finite = 1;
+                for (int i = 0; i < 2 * play; i++) {
+                    if (!isfinite(out[i])) finite = 0;
+                    if (fabsf(out[i]) > pk) pk = fabsf(out[i]);
+                }
+                float live = rms(out, play);
+                CHECK(finite && pk <= 1.f, "%s %s deep %s: finite, peak %.2f", mi->name, mi->algo[a], corner == 2 ? "mixed" : corner ? "up" : "down", pk);
+                CHECK(live > 0.001f, "%s %s deep %s: still sounds (rms %.4f)", mi->name, mi->algo[a], corner == 2 ? "mixed" : corner ? "up" : "down", live);
+            }
+    }
+
+    /* every factory preset: finite, sounding, every parameter in range */
+    for (int f = 0; f < NFACTORY; f++) {
+        Patch p;
+        const char *nm = patch_factory(&p, f);
+        int inrange = 1;
+        for (int m = 0; m < NMOD; m++)
+            for (int a = 0; a < MAXALGO; a++)
+                for (int k = 0; k < NPARAM; k++)
+                    if (!(p.m[m].p[a][k] >= 0.f && p.m[m].p[a][k] <= 1.f)) inrange = 0;
+        CHECK(inrange, "factory %s: parameters in range", nm);
+        engine_reset(e);
+        for (int i = 0; i < play; i += 256) engine_process(e, &p, in + 2 * i, out + 2 * i, play - i < 256 ? play - i : 256);
+        int finite = 1;
+        for (int i = 0; i < 2 * play; i++) if (!isfinite(out[i])) finite = 0;
+        CHECK(finite && rms(out, play) > 0.003f, "factory %s: finite, sounding (rms %.4f)", nm, rms(out, play));
+    }
+
     /* full wet passes no dry: a delay at 100 % with a long time is silent at first */
     {
         Patch p;

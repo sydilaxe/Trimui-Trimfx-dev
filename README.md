@@ -80,7 +80,7 @@ from MASTER > SETUP or STICKS, or with HOME on the Brick Pro.
 | L1 / R1 | The same as F1 / F2 |
 | D-pad ↑↓ | Choose a control on the pedal: ALGORITHM, the 4 knobs, the 4 sliders, MIX |
 | D-pad ←→ | Turn it (hold to speed up). On ALGORITHM: change the algorithm |
-| A | The pedal's footswitch (bypass). On MASTER rows: open SETUP / STICKS, save to the slot |
+| A | The pedal's footswitch (bypass). On ALGORITHM: open its DEEP page. On MASTER rows: open SETUP / STICKS, save to the slot |
 | B | Sticks: FOCUS ↔ MATRIX (in an overlay: close it) |
 | X | Sticks: SPRING ↔ LATCH |
 | Y | HOLD the sticks |
@@ -210,6 +210,67 @@ converters' era: 70s (narrow band, few bits), 80s, 90s, then NOW (full band).
 | HALO | **DECAY, SIZE, DAMP, MOD**, PRE-DELAY, COLOR, SHIMMER, INTERVAL | shimmer: every pass climbs an interval |
 | SPRING | **DECAY, TENSION, DAMP, WOBBLE**, PRE-DELAY, COLOR, DRIP, DRIVE | two dispersive springs: drips, wobble, tube driver |
 | INVERSE | **TIME, SHAPE, DAMP**, PRE-DELAY, COLOR, DENSITY, SPREAD | non-linear: swells up (inverse) or is cut off (gated) |
+
+## DEEP pages
+
+Every algorithm has a **DEEP page** for the settings you set once rather than play. Choose
+ALGORITHM on a box and press **A** to open it. F1 / F2 step through the four boxes; ←→ changes a setting;
+**A** puts it back to its default. A `*` marks what has been changed. Each page belongs to its algorithm:
+switch the algorithm and the page changes with it, and every algorithm keeps its own settings. At
+their defaults the DEEP settings sound exactly as TrimFX did before they existed.
+
+The stick matrix can also aim at a DEEP setting. So can MIDI: hold SELECT on the DEEP page to learn
+one; scene 1's knobs move the DEEP page while it is open; channels 6-9 move TONE, MOD, DELAY and
+REVERB's DEEP settings.
+
+**SYNC** locks a rate (or a delay time) to the tempo: FREE, 4 / 2 / 1 bars, or a note value.
+**DUCK** turns the delay's repeats or the reverb's tail down while you play, and lets them bloom
+in the gaps.
+
+| TONE | DEEP |
+|---|---|
+| LONDON, PUNCH, CLEAN, LACQUER | GLUE SPEED, LIMIT RELEASE (SP-1 Master's page 2), CRUSH BITS, CRUSH RATE |
+| CASSETTE | WOW RATE, FLUTTER RATE, DROPOUT RATE, HEAD BUMP |
+| SAMPLER | FILTER TYPE (low / band / high pass), ANTI-ALIAS, TRACK (the filter follows the rate) |
+| TUBE | WARM FREQ, AIR FREQ, MID FREQ, SAG SPEED |
+| FOLD | SUB TRACK, RECT BIAS, SMOOTH |
+
+| MOD | DEEP |
+|---|---|
+| TRIPLE | PHASE (how far apart the three LFOs run), SYNC, ENV>FREQ (playing moves the filters), CARDS (how differently the three PS-3200 cards are voiced), DIODES (how soon the resonance is held back), WIDTH, RESPONSE (band / low / high pass) |
+| BARBERPOLE | SYNC, DRIFT RATE, FB TONE |
+| SPIRAL | SYNC, LOOP LOW CUT, SATURATE |
+| CHOIR | SYNC, DRIFT RATE, HIGH FORMANT, BREATH (a whisper through the formants) |
+| DRIFT | SYNC, SPREAD RATES, CROSS |
+| ORBIT | SYNC, DARKEST, SAT RATIO |
+| LIQUID | SYNC, CELLS (how unmatched the photocells are), LAMP SPEED |
+| TIDE | SYNC, ENV SPEED, SLOPE |
+| STRINGS | SCAN SYNC, SPLIT (odd / even as on the boards, lows / highs, all centre), SCAN WIDTH, VAC ATTACK |
+
+| DELAY | DEEP |
+|---|---|
+| GRANULAR | SYNC, DUCK, ENVELOPE (bell .. flat grains), FB TONE, DETUNE |
+| RHYTHM | DUCK, WOBBLE RATE, ACCENT |
+| REVERSO | SYNC, DUCK, SPLICE, DRIFT RATE |
+| TAPE | SYNC, DUCK, WOW RATE, FLUTTER RATE, SPACING (of the three heads) |
+| SHIMMER | SYNC, DUCK, WINDOW, DRIFT RATE |
+| CLOUD | SYNC, DUCK RELEASE, WANDER RATE |
+| STUTTER | FADE, LOOK BACK (catch the slice 1-4 slices ago) |
+| DUB | SYNC, DUCK, WOBBLE RATE |
+
+| REVERB | DEEP |
+|---|---|
+| CONCERT, PLATE | X-OVER (where BASS takes over), SPIN RATE, WANDER, TANK DIFF, DUCK, WIDTH |
+| CHAMBER 8X8 | X-OVER, LOW DECAY, DIFFUSION, WANDER RATE, DUCK, WIDTH |
+| SPACE | WANDER RATE, DRIVE, DUCK, WIDTH |
+| CLASSIC | WANDER RATE, DIFFUSER, STEREO, DUCK, WIDTH |
+| BLOOM | DUCK, WIDTH |
+| MIDIVERB | DUCK |
+| HALO | X-OVER, SPIN RATE, DIFFUSION, WINDOW (the shifter's), DUCK, WIDTH |
+| SPRING | LOW CUT, PAIR (the second spring's length), WOBBLE RATE, CHIRP, DUCK, WIDTH |
+| INVERSE | TAPS, JITTER, DUCK, WIDTH |
+
+![A DEEP page](docs/screen-deep.png)
 
 ## Presets
 

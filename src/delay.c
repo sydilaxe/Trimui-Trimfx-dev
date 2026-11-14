@@ -75,12 +75,25 @@ void delay_reset(Delay *d, int algo)
     d->swell = 1.f;
 }
 
+/* the tempo divisions, in quarter notes */
+static const float DIV[12] = {0.125f, 1.f / 6, 0.25f, 1.f / 3, 0.375f, 0.5f, 2.f / 3, 0.75f, 1.f, 4.f / 3, 1.5f, 2.f};
+static const char *const DIVN[12] = {"1/32", "1/16T", "1/16", "1/8T", "1/16.", "1/8", "1/4T", "1/8.", "1/4", "1/2T", "1/4.", "1/2"};
+/* DEEP SYNC: FREE (the TIME knob), else one of the divisions */
+static float synced(float raw, float bpm, float free_s)
+{
+    int s = pstep(raw, 13);
+    return s ? 60.f / clampf(bpm, 40.f, 240.f) * DIV[s - 1] : free_s;
+}
+
 /* ---------------------------------------------------------------- GRANULAR */
 static const float SEMI[10] = {-24, -12, -7, -5, 0, 5, 7, 12, 19, 24};
 
 static void granular(Delay *d, const float *p, const float *raw, const Patch *pt, float *l, float *r, int n)
 {
-    float time = expmap(p[0], 0.01f, 3.f) * TFX_SR, fb = p[1] * 0.95f;
+    /* DEEP: SYNC, DUCK, ENVELOPE (smooth bell .. flat with short edges), FB TONE, DETUNE (a random
+     * pitch each grain) */
+    float env = p[10], fbk = onepole_coef(expmap(p[11], 500.f, 18000.f)), detune = p[12] * 0.5f;
+    float time = synced(raw[8], pt->bpm, expmap(p[0], 0.01f, 3.f)) * TFX_SR, fb = p[1] * 0.95f;
     float ratio0 = exp2f(SEMI[pstep(raw[2], 10)] / 12.f);
     float dens = expmap(p[3], 1.f, 60.f), size = expmap(p[4], 0.015f, 0.6f) * TFX_SR;
     float spray = p[5], rev = p[6], sparkle = p[7];
@@ -97,6 +110,7 @@ static void granular(Delay *d, const float *p, const float *raw, const Patch *pt
                 if (g->on) continue;
                 float ratio = ratio0;
                 if (rng_uni(&d->rng) < sparkle * 0.5f) ratio *= rng_uni(&d->rng) < 0.5f ? 2.f : 0.5f;
+                if (detune > 0.f) ratio *= exp2f(detune * rng_bi(&d->rng) / 12.f);
                 g->len = (int)(size * (0.75f + 0.5f * rng_uni(&d->rng)));
                 if (g->len < 64) g->len = 64;
                 float back = time + spray * rng_uni(&d->rng) * (time > 0.5f * TFX_SR ? time : 0.5f * TFX_SR);
@@ -120,6 +134,7 @@ static void granular(Delay *d, const float *p, const float *raw, const Patch *pt
             Grain *g = &d->g[k];
             if (!g->on) continue;
             float w = 0.5f - 0.5f * lfo_sin((float)g->age / (float)g->len + 0.25f);
+            if (env > 0.f) w = lerpf(w, fminf(w * 6.f, 1.f), env);
             ol += w * g->gl * dly_at(&d->b[0], g->pos);
             orr += w * g->gr * dly_at(&d->b[1], g->pos);
             g->pos += g->rate;
@@ -129,8 +144,8 @@ static void granular(Delay *d, const float *p, const float *raw, const Patch *pt
         }
         if (!freeze) {
             /* the cloud back into the memory: darkened a little, kept from running away */
-            d->lp[0] += 0.35f * (ol - d->lp[0]);
-            d->lp[1] += 0.35f * (orr - d->lp[1]);
+            d->lp[0] += fbk * (ol - d->lp[0]);
+            d->lp[1] += fbk * (orr - d->lp[1]);
             dly_push(&d->b[0], l[i] + fb * softclip(d->lp[0]));
             dly_push(&d->b[1], r[i] + fb * softclip(d->lp[1]));
         }
@@ -140,8 +155,6 @@ static void granular(Delay *d, const float *p, const float *raw, const Patch *pt
 }
 
 /* ---------------------------------------------------------------- RHYTHM */
-static const float DIV[12] = {0.125f, 1.f / 6, 0.25f, 1.f / 3, 0.375f, 0.5f, 2.f / 3, 0.75f, 1.f, 4.f / 3, 1.5f, 2.f};
-static const char *const DIVN[12] = {"1/32", "1/16T", "1/16", "1/8T", "1/16.", "1/8", "1/4T", "1/8.", "1/4", "1/2T", "1/4.", "1/2"};
 typedef struct { int len, n; float step[8], gain[8], pan[8]; } Pattern;
 static const Pattern PAT[8] = {
     {1, 1, {1}, {1}, {0}},
@@ -162,6 +175,8 @@ static float rhythm_step(float v, float bpm)
 
 static void rhythm(Delay *d, const float *p, const float *raw, const Patch *pt, float *l, float *r, int n)
 {
+    /* DEEP: DUCK, WOBBLE RATE, ACCENT (how much the pattern's loud taps stand out) */
+    float wrate = expmap(p[9], 0.1f, 6.f), accent = p[10] * 2.f;
     const Pattern *pat = &PAT[pstep(raw[2], 8)];
     float step = rhythm_step(raw[0], pt->bpm) * TFX_SR;
     float maxstep = (float)(DMEM - TFX_SR / 4) / (float)pat->len;
@@ -173,12 +188,13 @@ static void rhythm(Delay *d, const float *p, const float *raw, const Patch *pt, 
     float hpk = tone > 0 ? onepole_coef(expmap(tone, 20.f, 2500.f)) : 0.f;
     if (freeze) lpk = 1.f, hpk = 0.f;
     float tg = 0.f;
-    for (int t = 0; t < pat->n; t++) tg += pat->gain[t];
+    float pg[8];
+    for (int t = 0; t < pat->n; t++) pg[t] = powf(pat->gain[t], accent), tg += pg[t];
     float norm = 1.2f / sqrtf(tg);
     if (d->time_s <= 0.f) d->time_s = step;
     for (int i = 0; i < n; i++) {
         d->time_s += (step - d->time_s) * 0.0005f;
-        d->wph += 0.6f / TFX_SR;
+        d->wph += wrate / TFX_SR;
         d->wph -= floorf(d->wph);
         float wo = wob * (0.6f * lfo_sin(d->wph) + 0.4f * wander_tick(&d->ww, &d->rng, 1.3f));
         float st = d->time_s;
@@ -189,7 +205,7 @@ static void rhythm(Delay *d, const float *p, const float *raw, const Patch *pt, 
                 float s = pat->step[t];
                 float dt = s * st + (((int)s & 1) ? swing * st : 0.f) + wo;
                 float pan = pat->pan[t] * spread;
-                float g = pat->gain[t] * sqrtf(0.5f * (1.f + (c ? pan : -pan)));
+                float g = pg[t] * sqrtf(0.5f * (1.f + (c ? pan : -pan)));
                 out[c] += g * dly_lin(&d->b[c], dt);
             }
         }
@@ -212,9 +228,11 @@ static void rhythm(Delay *d, const float *p, const float *raw, const Patch *pt, 
 }
 
 /* ---------------------------------------------------------------- REVERSO */
-static void reverso(Delay *d, const float *p, const Patch *pt, float *l, float *r, int n)
+static void reverso(Delay *d, const float *p, const float *raw, const Patch *pt, float *l, float *r, int n)
 {
-    float T = expmap(p[0], 0.06f, 2.5f) * TFX_SR;
+    /* DEEP: SYNC, DUCK, SPLICE (the reverse heads' crossfade: smooth .. short), DRIFT RATE */
+    float splice = p[10], drate = expmap(p[11], 0.05f, 3.f);
+    float T = synced(raw[8], pt->bpm, expmap(p[0], 0.06f, 2.5f)) * TFX_SR;
     int freeze = pt->freeze_dly;
     float fb = freeze ? 1.f : p[1] * 0.95f, dir = p[2], smear = p[3] * 0.72f, drift = p[4] * 0.015f;
     float lpk = freeze ? 1.f : onepole_coef(expmap(p[5], 900.f, 18000.f)), spread = p[6], swell = p[7];
@@ -222,7 +240,7 @@ static void reverso(Delay *d, const float *p, const Patch *pt, float *l, float *
     float stime = 0.002f + swell * swell * 3.f; /* the swell's rise, s */
     for (int i = 0; i < n; i++) {
         d->time_s += (T - d->time_s) * 0.0003f;
-        float dr = 1.f + drift * wander_tick(&d->rw, &d->rng, 0.35f);
+        float dr = 1.f + drift * wander_tick(&d->rw, &d->rng, drate);
         /* auto-swell: duck at each new phrase, then rise */
         float lev = fabsf(l[i]) + fabsf(r[i]);
         d->env_f += (lev - d->env_f) * (lev > d->env_f ? 0.02f : 0.002f);
@@ -247,6 +265,7 @@ static void reverso(Delay *d, const float *p, const Patch *pt, float *l, float *
                 if (cc >= Tc) cc -= Tc;
                 float ph = cc / Tc;
                 float w = 0.5f - 0.5f * lfo_sin(ph + 0.25f);
+                if (splice > 0.f) w = lerpf(w, fminf(w * 8.f, 1.f) * 0.5f + 0.5f * w, splice);
                 rev += w * dly_lin(&d->b[c], 2.f * cc + 2.f);
             }
             float o = lerpf(fwd, rev, dir);
@@ -268,7 +287,10 @@ static const char *const HEADN[7] = {"1", "2", "3", "1+2", "2+3", "1+3", "1+2+3"
 
 static void tape(Delay *d, const float *p, const float *raw, const Patch *pt, float *l, float *r, int n)
 {
-    float T = expmap(p[0], 0.04f, 1.2f) * TFX_SR;
+    /* DEEP: SYNC (the longest head), DUCK, WOW RATE, FLUTTER RATE, SPACING (the heads evenly spaced,
+     * bunched toward the long head, or toward the short) */
+    float wr = expmap(p[10], 0.1f, 3.f), fr = expmap(p[11], 2.f, 20.f), sexp = expmap(p[12], 0.5f, 2.f);
+    float T = synced(raw[8], pt->bpm, expmap(p[0], 0.04f, 1.2f)) * TFX_SR;
     int freeze = pt->freeze_dly;
     float fb = freeze ? 1.f : p[1] * 1.15f;
     int heads = HEADS[pstep(raw[2], 7)];
@@ -282,8 +304,8 @@ static void tape(Delay *d, const float *p, const float *raw, const Patch *pt, fl
     if (d->time_s <= 0.f) d->time_s = T;
     for (int i = 0; i < n; i++) {
         d->time_s += (T - d->time_s) * 0.00006f; /* the motor: slow, so time changes glide in pitch */
-        d->tph_w += 0.55f / TFX_SR; d->tph_w -= floorf(d->tph_w);
-        d->tph_f += 6.8f / TFX_SR; d->tph_f -= floorf(d->tph_f);
+        d->tph_w += wr / TFX_SR; d->tph_w -= floorf(d->tph_w);
+        d->tph_f += fr / TFX_SR; d->tph_f -= floorf(d->tph_f);
         float sp = 1.f + wow * (0.7f * lfo_sin(d->tph_w) + 0.3f * wander_tick(&d->tw, &d->rng, 0.9f)) +
                    flut * lfo_sin(d->tph_f);
         float x[2] = {l[i], r[i]};
@@ -291,7 +313,7 @@ static void tape(Delay *d, const float *p, const float *raw, const Patch *pt, fl
             float out = 0.f, loop = 0.f;
             for (int h = 0; h < 3; h++) {
                 if (!(heads & (1 << h))) continue;
-                float y = dly_herm(&d->b[c], d->time_s * sp * (float)(h + 1) / 3.f + (c ? 7.f : 0.f));
+                float y = dly_herm(&d->b[c], d->time_s * sp * powf((float)(h + 1) / 3.f, sexp) + (c ? 7.f : 0.f));
                 float pan = HP[h] * spread;
                 out += y * hn * sqrtf(1.f + (c ? pan : -pan)) * 0.75f;
                 if (h == last) loop = y;
@@ -314,15 +336,17 @@ static const char *const SHSN[6] = {"+OCTAVE", "+FIFTH", "+FOURTH", "-OCTAVE", "
 
 static void shimmer(Delay *d, const float *p, const float *raw, const Patch *pt, float *l, float *r, int n)
 {
-    float T = expmap(p[0], 0.08f, 2.f) * TFX_SR;
+    /* DEEP: SYNC, DUCK, WINDOW (the pitch shifter's: short is grainy, long is smooth), DRIFT RATE */
+    float drate = expmap(p[11], 0.05f, 3.f);
+    float T = synced(raw[8], pt->bpm, expmap(p[0], 0.08f, 2.f)) * TFX_SR;
     int freeze = pt->freeze_dly;
     float fb = freeze ? 1.f : p[1] * 0.92f, ratio = exp2f(SHS[pstep(raw[2], 6)] / 12.f), smix = p[3];
     float lpk = onepole_coef(expmap(p[4], 1500.f, 18000.f)), diff = p[5] * 0.7f, spread = p[6], drift = p[7] * 0.01f;
     if (d->time_s <= 0.f) d->time_s = T;
-    const float W = 0.08f * TFX_SR;
+    const float W = expmap(p[10], 0.02f, 0.12f) * TFX_SR;
     for (int i = 0; i < n; i++) {
         d->time_s += (T - d->time_s) * 0.0003f;
-        float dr = 1.f + drift * wander_tick(&d->ww, &d->rng, 0.3f);
+        float dr = 1.f + drift * wander_tick(&d->ww, &d->rng, drate);
         d->shph += (1.f - ratio) / W;
         d->shph -= floorf(d->shph);
         float x[2] = {l[i], r[i]};
@@ -347,9 +371,11 @@ static void shimmer(Delay *d, const float *p, const float *raw, const Patch *pt,
 /* ---------------------------------------------------------------- CLOUD */
 static const float CLR[4] = {1.f, 1.37f, 0.71f, 1.83f};
 
-static void cloud(Delay *d, const float *p, const Patch *pt, float *l, float *r, int n)
+static void cloud(Delay *d, const float *p, const float *raw, const Patch *pt, float *l, float *r, int n)
 {
-    float T = expmap(p[0], 0.1f, 1.f) * TFX_SR;
+    /* DEEP: SYNC, DUCK RELEASE (how slowly the haze comes back), WANDER RATE */
+    float drel = expmap(p[9], 0.25f, 4.f), wsc = expmap(p[10], 0.25f, 4.f);
+    float T = synced(raw[8], pt->bpm, expmap(p[0], 0.1f, 1.f)) * TFX_SR;
     int freeze = pt->freeze_dly;
     float fb = freeze ? 1.f : p[1] * 0.9f, diff = p[2] * 0.75f, mod = p[3] * 0.012f * TFX_SR;
     float lpk = freeze ? 1.f : onepole_coef(expmap(p[4], 1200.f, 16000.f)), spread = p[5], bloom = p[6], duck = p[7];
@@ -357,9 +383,9 @@ static void cloud(Delay *d, const float *p, const Patch *pt, float *l, float *r,
     for (int i = 0; i < n; i++) {
         d->time_s += (T - d->time_s) * 0.0003f;
         float lev = fabsf(l[i]) + fabsf(r[i]);
-        d->env_f += (lev - d->env_f) * (lev > d->env_f ? 0.01f : 0.0004f);
+        d->env_f += (lev - d->env_f) * (lev > d->env_f ? 0.01f : 0.0004f / drel);
         float dk = 1.f / (1.f + duck * 12.f * d->env_f);
-        d->cduck += (dk - d->cduck) * 0.002f;
+        d->cduck += (dk - d->cduck) * (dk < d->cduck ? 0.002f : 0.002f / drel);
         float in[2];
         for (int c = 0; c < 2; c++) {
             float x = freeze ? 0.f : (c ? r[i] : l[i]);
@@ -368,7 +394,7 @@ static void cloud(Delay *d, const float *p, const Patch *pt, float *l, float *r,
         }
         float y[4];
         for (int k = 0; k < 4; k++) {
-            float t = d->time_s * lerpf(1.f, CLR[k], spread) + mod * (1.f + wander_tick(&d->cw[k], &d->rng, 0.2f + 0.13f * k));
+            float t = d->time_s * lerpf(1.f, CLR[k], spread) + mod * (1.f + wander_tick(&d->cw[k], &d->rng, (0.2f + 0.13f * k) * wsc));
             float z = dly_lin(&d->cl[k], t + 8.f);
             d->clp[k] += lpk * (z - d->clp[k]);
             y[k] = d->clp[k];
@@ -389,12 +415,15 @@ static void cloud(Delay *d, const float *p, const Patch *pt, float *l, float *r,
 /* ---------------------------------------------------------------- STUTTER */
 static void stutter(Delay *d, const float *p, const float *raw, const Patch *pt, float *l, float *r, int n)
 {
+    /* DEEP: FADE (each repeat's edges), LOOK BACK (catch the slice 1-4 slices ago) */
+    float fadeL = expmap(p[8], 16.f, 2000.f);
+    int back = 1 + pstep(raw[9], 4);
     float slice = rhythm_step(raw[0], pt->bpm) * TFX_SR;
     float chance = p[1];
     int reps = 2 + (int)(p[2] * 14.f);
     float pitch = (p[3] * 2.f - 1.f) * 12.f, rev = p[4], decay = 0.55f + 0.45f * p[5], gate = 0.25f + 0.75f * p[6], spread = p[7];
     const float N = (float)(d->b[0].mask + 1);
-    const float fade = 96.f;
+    const float fade = fadeL;
     for (int i = 0; i < n; i++) {
         float x[2] = {l[i], r[i]};
         if (!pt->freeze_dly) {
@@ -424,7 +453,7 @@ static void stutter(Delay *d, const float *p, const float *raw, const Patch *pt,
                 d->st_len = slice;
                 d->st_rev = rng_uni(&d->rng) < rev;
                 d->st_pan = spread * (rng_uni(&d->rng) < 0.5f ? -1.f : 1.f);
-                d->st_start = (float)d->b[0].w - slice;
+                d->st_start = (float)d->b[0].w - slice * (float)back;
                 if (d->st_start < 0.f) d->st_start += N;
             }
         }
@@ -433,8 +462,9 @@ static void stutter(Delay *d, const float *p, const float *raw, const Patch *pt,
             float ph = d->st_pos;
             float w = 0.f;
             if (ph < len) {
-                w = ph < fade ? ph / fade : 1.f;
-                if (len - ph < fade) w = fminf(w, (len - ph) / fade);
+                float fd = fminf(fade, 0.5f * len);
+                w = ph < fd ? ph / fd : 1.f;
+                if (len - ph < fd) w = fminf(w, (len - ph) / fd);
             }
             float at = d->st_rev ? d->st_start + d->st_len - 1.f - ph : d->st_start + ph;
             while (at >= N) at -= N;
@@ -451,16 +481,18 @@ static void stutter(Delay *d, const float *p, const float *raw, const Patch *pt,
 }
 
 /* ---------------------------------------------------------------- DUB */
-static void dub(Delay *d, const float *p, const Patch *pt, float *l, float *r, int n)
+static void dub(Delay *d, const float *p, const float *raw, const Patch *pt, float *l, float *r, int n)
 {
-    float T = expmap(p[0], 0.05f, 1.5f) * TFX_SR;
+    /* DEEP: SYNC, DUCK, WOBBLE RATE */
+    float wrate = expmap(p[10], 0.1f, 3.f);
+    float T = synced(raw[8], pt->bpm, expmap(p[0], 0.05f, 1.5f)) * TFX_SR;
     int freeze = pt->freeze_dly;
     float fb = freeze ? 1.f : p[1] * 1.2f, g = svf_g(expmap(p[2], 100.f, 8000.f)), k = 1.f / expmap(p[3], 0.6f, 10.f);
     float type = p[4], drive = 1.f + p[5] * 4.f, spread = p[6], wob = p[7] * 0.004f * TFX_SR;
     if (d->time_s <= 0.f) d->time_s = T;
     for (int i = 0; i < n; i++) {
         d->time_s += (T - d->time_s) * 0.0001f;
-        d->wph += 0.5f / TFX_SR; d->wph -= floorf(d->wph);
+        d->wph += wrate / TFX_SR; d->wph -= floorf(d->wph);
         float wo = wob * (0.5f + 0.5f * lfo_sin(d->wph));
         float y[2], x[2] = {l[i], r[i]};
         for (int c = 0; c < 2; c++) y[c] = dly_lin(&d->b[c], d->time_s * (c ? 1.f + 0.5f * spread : 1.f) + wo + 4.f);
@@ -481,18 +513,37 @@ static void dub(Delay *d, const float *p, const Patch *pt, float *l, float *r, i
     }
 }
 
+/* which deep parameter is DUCK (-1: none) */
+static const int DUCK_P[DL_N] = {9, 8, 9, 9, 9, -1, -1, 9};
+
 void delay_process(Delay *d, int algo, const float *p, const float *raw, const Patch *pt, float *l, float *r, int n)
 {
+    float lev[MOD_BLOCK];
+    int dp = DUCK_P[algo];
+    float duck = dp >= 0 ? p[dp] : 0.f;
+    if (duck > 0.001f)
+        for (int i = 0; i < n; i++) lev[i] = 0.5f * (fabsf(l[i]) + fabsf(r[i]));
     switch (algo) {
     case DL_GRAIN: granular(d, p, raw, pt, l, r, n); break;
     case DL_RHYTHM: rhythm(d, p, raw, pt, l, r, n); break;
-    case DL_REVERSO: reverso(d, p, pt, l, r, n); break;
+    case DL_REVERSO: reverso(d, p, raw, pt, l, r, n); break;
     case DL_TAPE: tape(d, p, raw, pt, l, r, n); break;
     case DL_SHIMMER: shimmer(d, p, raw, pt, l, r, n); break;
-    case DL_CLOUD: cloud(d, p, pt, l, r, n); break;
+    case DL_CLOUD: cloud(d, p, raw, pt, l, r, n); break;
     case DL_STUTTER: stutter(d, p, raw, pt, l, r, n); break;
-    default: dub(d, p, pt, l, r, n); break;
+    default: dub(d, p, raw, pt, l, r, n); break;
     }
+    /* DUCK: the repeats step back while you play, and swell up in the gaps */
+    if (duck > 0.001f) {
+        for (int i = 0; i < n; i++) {
+            d->dk_env += (lev[i] - d->dk_env) * (lev[i] > d->dk_env ? 0.01f : 0.0003f);
+            float g = 1.f / (1.f + duck * 16.f * d->dk_env);
+            d->dk_g += (g - d->dk_g) * (g < d->dk_g ? 0.003f : 0.0004f);
+            l[i] *= d->dk_g;
+            r[i] *= d->dk_g;
+        }
+    } else
+        d->dk_g = 1.f, d->dk_env = 0.f;
 }
 
 /* ---------------------------------------------------------------- the UI side */
@@ -500,6 +551,53 @@ static void secs(char *o, int n, float s) { snprintf(o, n, s < 1.f ? "%.0f ms" :
 
 static void fmt(int algo, int p, float v, const Patch *pt, char *o, int n)
 {
+    if (p >= NBOARD) {
+        int dd = p - NBOARD;
+        float bpm = pt ? pt->bpm : 120.f;
+        if (dd == 0 && algo != DL_RHYTHM && algo != DL_STUTTER) {
+            int s = pstep(v, 13);
+            if (!s) snprintf(o, n, "FREE");
+            else snprintf(o, n, "%s %.0fms", DIVN[s - 1], 60.f / clampf(bpm, 40.f, 240.f) * DIV[s - 1] * 1000.f);
+            return;
+        }
+        if (dd == (DUCK_P[algo] - NBOARD)) { snprintf(o, n, v < 0.01f ? "OFF" : "%.0f %%", v * 100.f); return; }
+        switch (algo) {
+        case DL_GRAIN:
+            if (dd == 2) { snprintf(o, n, v < 0.03f ? "BELL" : v > 0.97f ? "FLAT" : "%.0f %% FLAT", v * 100.f); return; }
+            if (dd == 3) { snprintf(o, n, "%.0f Hz", expmap(v, 500.f, 18000.f)); return; }
+            if (dd == 4) { snprintf(o, n, "+-%.2f st", v * 0.5f); return; }
+            break;
+        case DL_RHYTHM:
+            if (dd == 1) { snprintf(o, n, "%.2f Hz", expmap(v, 0.1f, 6.f)); return; }
+            if (dd == 2) { snprintf(o, n, v < 0.02f ? "EVEN" : "x%.1f", v * 2.f); return; }
+            break;
+        case DL_REVERSO:
+            if (dd == 2) { snprintf(o, n, v < 0.03f ? "SMOOTH" : "%.0f %% SHORT", v * 100.f); return; }
+            if (dd == 3) { snprintf(o, n, "%.2f Hz", expmap(v, 0.05f, 3.f)); return; }
+            break;
+        case DL_TAPE:
+            if (dd == 2) { snprintf(o, n, "%.2f Hz", expmap(v, 0.1f, 3.f)); return; }
+            if (dd == 3) { snprintf(o, n, "%.1f Hz", expmap(v, 2.f, 20.f)); return; }
+            if (dd == 4) { float e = expmap(v, 0.5f, 2.f); snprintf(o, n, fabsf(e - 1.f) < 0.05f ? "EVEN" : e > 1.f ? "BUNCHED LONG" : "BUNCHED SHORT"); return; }
+            break;
+        case DL_SHIMMER:
+            if (dd == 2) { snprintf(o, n, "%.0f ms", expmap(v, 0.02f, 0.12f) * 1000.f); return; }
+            if (dd == 3) { snprintf(o, n, "%.2f Hz", expmap(v, 0.05f, 3.f)); return; }
+            break;
+        case DL_CLOUD:
+            if (dd == 1 || dd == 2) { snprintf(o, n, "x%.2f", expmap(v, 0.25f, 4.f)); return; }
+            break;
+        case DL_STUTTER:
+            if (dd == 0) { snprintf(o, n, "%.0f ms", expmap(v, 16.f, 2000.f) / 48.f); return; }
+            if (dd == 1) { snprintf(o, n, "%d SLICE%s", 1 + pstep(v, 4), pstep(v, 4) ? "S" : ""); return; }
+            break;
+        case DL_DUB:
+            if (dd == 2) { snprintf(o, n, "%.2f Hz", expmap(v, 0.1f, 3.f)); return; }
+            break;
+        }
+        snprintf(o, n, "%.0f %%", v * 100.f);
+        return;
+    }
     switch (algo) {
     case DL_GRAIN:
         if (p == 0) { secs(o, n, expmap(v, 0.01f, 3.f)); return; }
@@ -567,24 +665,24 @@ const ModInfo delay_info = {
      "beat-repeat: catches slices, pitches and flips them",
      "dub echo through a morphing resonant filter, runaway"},
     {
-        {"TIME", "FEEDBACK", "PITCH", "DENSITY", "SIZE", "SPRAY", "REVERSE", "SPARKLE"},
-        {"DIVISION", "FEEDBACK", "PATTERN", "TONE", "SWING", "SPREAD", "WOBBLE", "DIFFUSE"},
-        {"TIME", "FEEDBACK", "DIRECTION", "SMEAR", "DRIFT", "TONE", "SPREAD", "SWELL"},
-        {"TIME", "FEEDBACK", "HEADS", "WOW", "FLUTTER", "AGE", "DRIVE", "SPREAD"},
-        {"TIME", "FEEDBACK", "INTERVAL", "SHIFT", "TONE", "DIFFUSE", "SPREAD", "DRIFT"},
-        {"TIME", "FEEDBACK", "DIFFUSION", "MOD", "TONE", "SPREAD", "BLOOM", "DUCK"},
-        {"DIVISION", "CHANCE", "REPEATS", "PITCH", "REVERSE", "DECAY", "GATE", "SPREAD"},
-        {"TIME", "FEEDBACK", "FILTER", "RESO", "TYPE", "DRIVE", "SPREAD", "WOBBLE"},
+        {"TIME", "FEEDBACK", "PITCH", "DENSITY", "SIZE", "SPRAY", "REVERSE", "SPARKLE", "SYNC", "DUCK", "ENVELOPE", "FB TONE", "DETUNE"},
+        {"DIVISION", "FEEDBACK", "PATTERN", "TONE", "SWING", "SPREAD", "WOBBLE", "DIFFUSE", "DUCK", "WOBBLE RATE", "ACCENT"},
+        {"TIME", "FEEDBACK", "DIRECTION", "SMEAR", "DRIFT", "TONE", "SPREAD", "SWELL", "SYNC", "DUCK", "SPLICE", "DRIFT RATE"},
+        {"TIME", "FEEDBACK", "HEADS", "WOW", "FLUTTER", "AGE", "DRIVE", "SPREAD", "SYNC", "DUCK", "WOW RATE", "FLUTTER RATE", "SPACING"},
+        {"TIME", "FEEDBACK", "INTERVAL", "SHIFT", "TONE", "DIFFUSE", "SPREAD", "DRIFT", "SYNC", "DUCK", "WINDOW", "DRIFT RATE"},
+        {"TIME", "FEEDBACK", "DIFFUSION", "MOD", "TONE", "SPREAD", "BLOOM", "DUCK", "SYNC", "DUCK RELEASE", "WANDER RATE"},
+        {"DIVISION", "CHANCE", "REPEATS", "PITCH", "REVERSE", "DECAY", "GATE", "SPREAD", "FADE", "LOOK BACK"},
+        {"TIME", "FEEDBACK", "FILTER", "RESO", "TYPE", "DRIVE", "SPREAD", "WOBBLE", "SYNC", "DUCK", "WOBBLE RATE"},
     },
     {
-        {0.55f, 0.45f, 0.75f, 0.55f, 0.6f, 0.4f, 0.3f, 0.35f},
-        {0.66f, 0.45f, 0.15f, 0.35f, 0.f, 0.7f, 0.15f, 0.3f},
-        {0.6f, 0.5f, 0.7f, 0.45f, 0.3f, 0.6f, 0.3f, 0.f},
-        {0.6f, 0.45f, 0.9f, 0.3f, 0.25f, 0.35f, 0.25f, 0.5f},
-        {0.55f, 0.55f, 0.f, 0.6f, 0.6f, 0.4f, 0.4f, 0.3f},
-        {0.5f, 0.6f, 0.6f, 0.4f, 0.55f, 0.6f, 0.6f, 0.3f},
-        {0.35f, 0.35f, 0.3f, 0.5f, 0.2f, 0.6f, 0.9f, 0.5f},
-        {0.55f, 0.6f, 0.4f, 0.35f, 0.3f, 0.35f, 0.6f, 0.2f},
+        {0.55f, 0.45f, 0.75f, 0.55f, 0.6f, 0.4f, 0.3f, 0.35f, 0.f, 0.f, 0.f, 0.5258295f, 0.f},
+        {0.66f, 0.45f, 0.15f, 0.35f, 0.f, 0.7f, 0.15f, 0.3f, 0.f, 0.4376181f, 0.5f},
+        {0.6f, 0.5f, 0.7f, 0.45f, 0.3f, 0.6f, 0.3f, 0.f, 0.f, 0.f, 0.f, 0.4752678f},
+        {0.6f, 0.45f, 0.9f, 0.3f, 0.25f, 0.35f, 0.25f, 0.5f, 0.f, 0.f, 0.5012200f, 0.5314789f, 0.5f},
+        {0.55f, 0.55f, 0.f, 0.6f, 0.6f, 0.4f, 0.4f, 0.3f, 0.f, 0.f, 0.7737056f, 0.4376181f},
+        {0.5f, 0.6f, 0.6f, 0.4f, 0.55f, 0.6f, 0.6f, 0.3f, 0.f, 0.5f, 0.5f},
+        {0.35f, 0.35f, 0.3f, 0.5f, 0.2f, 0.6f, 0.9f, 0.5f, 0.3710943f, 0.f},
+        {0.55f, 0.6f, 0.4f, 0.35f, 0.3f, 0.35f, 0.6f, 0.2f, 0.f, 0.f, 0.4731974f},
     },
     0.5f,
     fmt,

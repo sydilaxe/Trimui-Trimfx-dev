@@ -28,7 +28,7 @@ the controller once with KONTROL Editor:
 
 | Control | CC | Does |
 |---|---|---|
-| Knobs 1-8 | 21-28 | P1-P8 of the box (scene 1: the one on screen; scenes 2-5: TONE / MOD / DELAY / REVERB). P1-P4 are the stick parameters, P5-P8 the small knobs |
+| Knobs 1-8 | 21-28 | P1-P8 of the box (scene 1: the one on screen, or its DEEP page while that is open; scenes 2-5: TONE / MOD / DELAY / REVERB). P1-P4 are the stick parameters, P5-P8 the small knobs. On channels 6-9 (a scene set to them) the same knobs move the DEEP settings of TONE / MOD / DELAY / REVERB |
 | Faders 1-4 | 31-34 | MIX of TONE, MOD, DELAY, REVERB |
 | Faders 5-8 | 35-38 | IN level (-24..+24 dB), DRY, OUT level, TEMPO (40-240 BPM) |
 | SOLO 1-4 | 41-44 | Footswitch (on / bypass) of TONE, MOD, DELAY, REVERB |
@@ -60,7 +60,8 @@ mapped in one go:
 
 1. Choose what to map:
    - a control on the board, with F1 / F2 and the D-pad: a knob, a slider, MIX, ALGORITHM, or on
-     MASTER IN / OUT / DRY / TEMPO / ORDER / SLOT;
+     MASTER IN / OUT / DRY / TEMPO / ORDER / SLOT; or a setting on a DEEP page (open the page
+     first, then hold SELECT);
    - or press the button whose job it should do: **A** the box's footswitch, **L3 / R3** freeze
      the delay / reverb, **X** LATCH, **Y** HOLD, **SELECT** tap tempo, **START** save,
      **L2 / R2** the box's previous / next algorithm.
