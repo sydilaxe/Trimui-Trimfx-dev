@@ -1,9 +1,9 @@
-/* Minimal software renderer into a 640x480 XRGB8888 buffer. */
+/* Minimal software renderer into a 1024x768 XRGB8888 buffer. */
 #pragma once
 #include <stdint.h>
 
-#define SCREEN_W 640
-#define SCREEN_H 480
+#define SCREEN_W 1024
+#define SCREEN_H 768
 
 enum { FONT_SMALL, FONT_LARGE };
 

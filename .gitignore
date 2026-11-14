@@ -1,3 +1,6 @@
 build/
 __pycache__/
 *.wav
+Apps/TrimFX/state.txt
+Apps/TrimFX/log.txt
+Apps/TrimFX/presets/slot*.txt

@@ -1,11 +1,11 @@
 #!/bin/sh
-# HELP: Skeleton: an audio app starting point. MENU quits.
-# ICON: skeleton
-# GRID: Skeleton
+# HELP: TrimFX: a four-module FX chain for a USB FX send, played with both sticks. MENU quits.
+# ICON: trimfx
+# GRID: TrimFX
 
 # MustardOS starts an app with this script, passing the app's folder. It sets up the app the way
 # MustardOS's own apps are set up, then runs launch.sh.
-APP=skeleton
+APP=trimfx
 
 APP_DIR="${1:-$(dirname "$0")}"
 
@@ -22,5 +22,5 @@ fi
 
 cd "$APP_DIR" || exit 1
 # the Brick Pro's screen can stay dark once the window opens: the app runs this then
-export SK_SCREEN_WAKE="$PWD/wake_screen.sh"
+export TFX_SCREEN_WAKE="$PWD/wake_screen.sh"
 ./launch.sh

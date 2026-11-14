@@ -1,0 +1,52 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  mustardos:
+    name: MustardOS package (Brick Pro, Brick, Brick Hammer)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          pip install ziglang==0.14.1
+          for s in Apps/TrimFX/launch.sh mustardos/*.sh; do sh -n "$s"; done
+          make -j"$(nproc)" package
+          file build/trimui/trimfx | grep -q "ARM aarch64"
+          # runs on the firmware's own SDL2, and needs nothing newer than glibc 2.28
+          readelf -d build/trimui/trimfx | grep -q "libSDL2-2.0.so.0"
+          if objdump -T build/trimui/trimfx | grep -o "GLIBC_[0-9.]*" | sort -uV | awk -F'[_.]' '$2 > 2 || ($2 == 2 && $3 > 28)' | grep .; then
+            echo "::error::the binary needs a glibc newer than 2.28"; exit 1
+          fi
+          m=build/TrimFX-mustardos.muxapp
+          for f in trimfx launch.sh mux_launch.sh wake_screen.sh glyph/trimfx.svg presets/README.txt LICENSE.txt; do
+            unzip -l $m | grep -q "TrimFX/$f$" || { echo "::error::$m has no $f"; exit 1; }
+          done
+          if unzip -Z1 $m | grep -Eq '^/|(^|/)\.\.(/|$)|\\'; then echo "::error::$m has unsafe paths"; exit 1; fi
+          if unzip -Zl $m | grep -Eq '^[bclps]'; then echo "::error::$m has links or devices"; exit 1; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TrimFX-mustardos
+          path: build/TrimFX-mustardos.muxapp
+
+  test:
+    name: Engine tests + screenshots (host)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libsdl2-dev
+      - name: Engine tests (ASan/UBSan)
+        run: make test
+      - name: Screenshots and WAVs
+        run: make -j"$(nproc)" shots wavs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shots-and-wavs
+          path: |
+            build/shots/
+            build/wavs/
