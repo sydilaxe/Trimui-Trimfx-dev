@@ -21,6 +21,7 @@ export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/lib"
 # export TFX_INPUT=Scarlett     # input: the same, for the capture side
 # export TFX_JOYMAP=A=1,B=0     # another firmware's button numbers
 # export TFX_LEDS=0             # leave the LEDs alone
+# export TFX_LED_BAR=meter      # top bar: the output level meter instead of the chain
 # export TFX_LOG=2              # a status line every second in log.txt, and every button press
 
 ./"$APP" > log.txt 2>&1

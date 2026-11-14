@@ -93,6 +93,22 @@ from MASTER > SETUP or STICKS, or with HOME on the Brick Pro.
 
 ![The STICKS overlay: the matrix and the sticks](docs/screen-sticks.png)
 
+## The lights (Brick Pro)
+
+The Brick Pro's LEDs follow the effects. The top of the screen and the joysticks on MASTER show the
+same lights.
+
+- **Stick rings:** where each stick's two parameters are now, sticks included. The corner nearest
+  the X/Y point glows brightest, in the colour of the box the stick plays. They breathe while HELD.
+  On screen, a cross-hair inside each joystick marks the same point.
+- **Top bar:** the chain in signal order, two lights per box. Each pair is that box's wet level as a
+  two-step meter over a faint glow (brighter for the box on screen). A pair is dark when its box is
+  bypassed (dim red if it is the box on screen) and pulses white when the box is frozen. The two ends
+  flash red when the output nears clipping. `TFX_LED_BAR=meter` in `launch.sh` brings back the plain
+  output meter.
+- **F1 / F2:** the colours of the boxes they step to.
+- **Shoulders:** the beat, at the tempo.
+
 ## MIDI control (Korg nanoKONTROL Studio)
 
 Plug a USB MIDI controller in (through a hub, with the audio interface) and it is picked up within two

@@ -1275,17 +1275,33 @@ static void dymo(int cx, int y, const char *s, uint32_t tape)
 }
 
 /* a Janus-style joystick: the gimbal plate, the boot, the stick leaning where it is pushed */
-static void joystick(int cx, int cy, int sz, float jx, float jy, uint32_t c)
+static void screen_led(int cx, int cy, float r, uint32_t c);
+static const float RCX[4] = {-1.f, -1.f, 1.f, 1.f}, RCY[4] = {1.f, -1.f, -1.f, 1.f}; /* UL LL LR UR */
+static uint32_t led_bar[8], led_ring[8], led_f[2];
+static float led_pt[2][2];      /* the sticks' parameter points, -1..1 */
+static uint32_t led_pcol[2];
+/* s: which stick (its ring LEDs and parameter point from led_model), -1 none */
+static void joystick(int cx, int cy, int sz, float jx, float jy, uint32_t c, int s)
 {
     int h = sz / 2;
     gfx_fill(cx - h + 3, cy - h + 3, sz, sz, 0x6f7174);
     gfx_fill(cx - h, cy - h, sz, sz, 0x141518);
-    for (int i = 0; i < 4; i++) /* its screws */
-        gfx_disc(cx + (i & 1 ? h - 9 : -h + 9), cy + (i & 2 ? h - 9 : -h + 9), 3.f, 0x3a3c40);
+    for (int k = 0; k < 4; k++) { /* the ring's four LEDs in the corners (UL LL LR UR) */
+        int lx = cx + (int)(RCX[k] * (h - 9)), ly = cy - (int)(RCY[k] * (h - 9));
+        if (s >= 0) screen_led(lx, ly, 4.f, led_ring[4 * s + k]);
+        else gfx_disc(lx, ly, 3.f, 0x3a3c40);
+    }
     gfx_disc(cx, cy, h - 8, 0x0a0a0c);
     gfx_ring(cx, cy, h - 8, 3.f, 0x2b2d31);
     gfx_disc(cx, cy, h - 18, 0x1d1e22); /* the rubber boot */
     gfx_ring(cx, cy, h * 0.45f, 1.5f, 0x26272b);
+    if (s >= 0) { /* where the stick's parameters are now: a cross-hair in the box's colour */
+        float px = cx + led_pt[s][0] * (h - 18), py = cy - led_pt[s][1] * (h - 18);
+        uint32_t pc = gfx_mix(led_pcol[s], 0xffffff, 0.25f);
+        gfx_line(px - 7, py, px + 7, py, 2.f, pc);
+        gfx_line(px, py - 7, px, py + 7, 2.f, pc);
+        gfx_ring(px, py, 5.f, 1.5f, pc);
+    }
     float tx = cx + jx * (h - 22), ty = cy - jy * (h - 22);
     gfx_line(cx, cy, tx, ty, 9.f, 0x2e3035);
     gfx_disc(tx + 2, ty + 3, 12.f, 0x050506);
@@ -1456,7 +1472,7 @@ static void master_strip(int x, int w)
     int m = focus_mod, a = base.m[m].algo, sz = 88;
     for (int s = 0; s < 2; s++) {
         int cy = tyy + 54 + sz / 2 + s * (sz + 30);
-        joystick(x + w / 2, cy, sz, av[2 * s], av[2 * s + 1], stick_matrix ? 0x8a8c90 : AXCOL[2 * s]);
+        joystick(x + w / 2, cy, sz, av[2 * s], av[2 * s + 1], stick_matrix ? 0x8a8c90 : AXCOL[2 * s], s);
         char lab[40];
         if (stick_matrix) snprintf(lab, sizeof lab, "%s MATRIX", s ? "R" : "L");
         else snprintf(lab, sizeof lab, "%.5s/%.5s", eng_info(m)->pname[a][2 * s], eng_info(m)->pname[a][2 * s + 1]);
@@ -1468,6 +1484,80 @@ static void master_strip(int x, int w)
     led(x + w - 18, y + 62, lo > 0.9f ? 0xff2b1a : 0xffa21a, lo > 0.01f);
 }
 
+/* ---------------------------------------------------------------- the lights */
+/* One model for the Brick Pro's LEDs and their copies on screen.
+ *   rings   where the sticks' parameters are now (the live value, sticks
+ *           included): the corner nearest the X/Y point glows brightest, in
+ *           the colour of the box the stick plays; breathing while HELD
+ *   top bar the chain in signal order, two lights a box: its wet level as a
+ *           two-step meter over a glow; dark when bypassed (dim red if it is
+ *           the box on screen), pulsing white while frozen; the ends flash
+ *           red when the output nears clipping
+ *   F1, F2  the colours of the boxes they step to */
+static int led_meter;           /* TFX_LED_BAR=meter: the top bar is the old output meter */
+
+static float lvl01(float pk) { float db = pk > 1e-6f ? 20.f * log10f(pk) : -120.f; return clampf((db + 42.f) / 42.f, 0.f, 1.f); }
+static uint32_t page_col(int c) { c = (c + NCOL) % NCOL; return c < COL_MASTER ? MODCOL[c] : 0xc8c8c8; }
+
+static void led_model(void)
+{
+    float t = SDL_GetTicks() / 1000.f;
+    for (int s = 0; s < 2; s++) {
+        float v[2] = {0.5f, 0.5f};
+        uint32_t c = 0x404040;
+        for (int a = 0; a < 2; a++) {
+            Target tg[2];
+            int n = axis_targets(2 * s + a, tg);
+            float *pv = n ? target_ptr(&live, tg[0]) : NULL;
+            if (pv) {
+                v[a] = *pv;
+                if (a == 0 || c == 0x404040) c = MODCOL[tg[0].mod];
+            }
+        }
+        float px = 2.f * v[0] - 1.f, py = 2.f * v[1] - 1.f;
+        led_pt[s][0] = px, led_pt[s][1] = py, led_pcol[s] = c;
+        float breathe = hold_on ? 0.55f + 0.45f * sinf(t * 5.f) : 1.f;
+        for (int k = 0; k < 4; k++) {
+            float d = 1.f - hypotf(px - RCX[k], py - RCY[k]) / 2.83f;
+            led_ring[4 * s + k] = ringleds_glow(c, (0.12f + 0.88f * d * d) * breathe);
+        }
+    }
+    int ord[4] = {M_TONE, 0, 0, 0};
+    eng_order(base.order, ord + 1);
+    float pulse = 0.5f + 0.5f * sinf(t * 6.f);
+    for (int k = 0; k < 4; k++) {
+        int m = ord[k];
+        uint32_t *b = &led_bar[2 * k];
+        int frozen = (m == M_DELAY && base.freeze_dly) || (m == M_VERB && base.freeze_verb);
+        if (base.m[m].bypass) {
+            b[0] = b[1] = m == focus_mod && col < COL_MASTER ? 0x401010 : 0;
+            continue;
+        }
+        if (frozen) { b[0] = b[1] = ringleds_glow(0xffffff, 0.35f + 0.65f * pulse); continue; }
+        float l = lvl01(vu_mod[m]), floor_ = m == focus_mod && col < COL_MASTER ? 0.4f : 0.15f;
+        b[0] = ringleds_glow(MODCOL[m], fmaxf(floor_, 2.f * l));
+        b[1] = ringleds_glow(MODCOL[m], fmaxf(floor_, 2.f * l - 1.f));
+    }
+    if (fmaxf(vu_out[0], vu_out[1]) > 0.97f) led_bar[0] = led_bar[7] = 0xff2010;
+    led_f[0] = ringleds_glow(page_col(col - 1), 0.5f);
+    led_f[1] = ringleds_glow(page_col(col + 1), 0.5f);
+}
+
+/* an LED on screen: its hardware colour, brightened (a lit LED looks brighter than its RGB value) */
+static void screen_led(int cx, int cy, float r, uint32_t c)
+{
+    gfx_disc(cx, cy, r + 2.f, 0x0b0c0e);
+    if (!c) { gfx_disc(cx, cy, r, 0x26272b); return; }
+    float k = 1.f;
+    int mx = (int)fmaxf(fmaxf((c >> 16) & 255, (c >> 8) & 255), c & 255);
+    if (mx > 0) k = fminf(255.f / mx, 1.f + 3.f * (1.f - mx / 255.f));
+    uint32_t rr = (uint32_t)fminf(255.f, ((c >> 16) & 255) * k), gg = (uint32_t)fminf(255.f, ((c >> 8) & 255) * k),
+             bb = (uint32_t)fminf(255.f, (c & 255) * k);
+    uint32_t cc = rr << 16 | gg << 8 | bb;
+    gfx_disc(cx, cy, r, gfx_mix(0x26272b, cc, 0.35f + 0.65f * mx / 255.f));
+    gfx_disc(cx - r * 0.3f, cy - r * 0.3f, r * 0.35f, gfx_mix(cc, 0xffffff, 0.5f));
+}
+
 static void draw_top(void)
 {
     char b[96];
@@ -1475,10 +1565,13 @@ static void draw_top(void)
     int w = gfx_text_w(b, FONT_SMALL) + 20;
     gfx_fill(10, 5, w, 26, 0x14161a);
     gfx_text(20, 7, b, in_dev ? 0xf2f2f2 : 0xff8080, FONT_SMALL);
+    /* the Brick Pro's top bar, as lit now */
+    gfx_fill(326, 5, 8 * 18 + 12, 26, 0x14161a);
+    for (int k = 0; k < 8; k++) screen_led(338 + k * 18, 18, 5.f, led_meter ? 0 : led_bar[k]);
     if (midi_count() || midi_learn) {
         snprintf(b, sizeof b, "%s %s", midi_learn ? "LEARN" : "MIDI", midi_count() ? midi_name() : "-");
         fit(b, 220);
-        int mw = gfx_text_w(b, FONT_SMALL) + 20, mx = W / 2 - mw / 2 + 60;
+        int mw = gfx_text_w(b, FONT_SMALL) + 20, mx = 494;
         gfx_fill(mx, 5, mw, 26, midi_learn ? ACCENT : 0x14161a);
         gfx_text(mx + 10, 7, b, midi_learn ? 0x14161a : SDL_GetTicks() < midi_flash ? ACCENT : 0xf2f2f2, FONT_SMALL);
     }
@@ -1572,6 +1665,7 @@ static void draw_overlay(void)
 static void draw(void)
 {
     if (!bg) make_bg();
+    led_model();
     if (bg) memcpy(surf->pixels, bg, sizeof(uint32_t) * W * H); /* the board and the bare boxes */
     else gfx_clear(BOARD);
     draw_top();
@@ -1767,6 +1861,10 @@ int main(int argc, char **argv)
     bi_init("TFX");
     bi_open_joysticks();
     is_pro = bi_is_brickpro();
+    {
+        const char *lb = getenv("TFX_LED_BAR");
+        led_meter = lb && !strcmp(lb, "meter");
+    }
     int leds = env_int("TFX_LEDS", 1) ? ringleds_open("TFX", is_pro) : 0;
     perf_log("START", "TrimFX %s on %s, %s, LEDs %s", TFX_VERSION, is_pro ? "Brick Pro" : "Brick",
              bi_is_mustardos() ? "MustardOS" : "TrimUI OS", leds ? "on" : "off");
@@ -1821,9 +1919,10 @@ int main(int argc, char **argv)
         }
 
         if (leds) {
-            uint32_t f1 = base.freeze_dly ? MODCOL[M_DELAY] : 0, f2 = base.freeze_verb ? MODCOL[M_VERB] : 0;
+            led_model();
+            ringleds_custom(led_meter ? NULL : led_bar, led_ring);
             int step = (int)(t0 / (60000.f / base.bpm / 4.f));
-            ringleds_update(sx[0], sy[0], MODCOL[focus_mod], sx[1], sy[1], AXCOL[2], 1, step, base.bpm, f1, f2);
+            ringleds_update(sx[0], sy[0], MODCOL[focus_mod], sx[1], sy[1], AXCOL[2], 1, step, base.bpm, led_f[0], led_f[1]);
         }
 
         draw();
