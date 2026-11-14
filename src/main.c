@@ -310,12 +310,20 @@ static int load_patch(const char *path, Patch *p)
 static void slot_path(char *out, int n, int slot) { snprintf(out, n, "%s/presets/slot%02d.txt", app_dir, slot + 1); }
 static void state_path(char *out, int n) { snprintf(out, n, "%s/state.txt", app_dir); }
 
-/* ================================================================ the UI */
-enum { PG_TONE, PG_MOD, PG_DELAY, PG_VERB, PG_STICKS, PG_SETUP, NPAGE };
-static const char *const PAGE_N[NPAGE] = {"TONE", "MOD", "DELAY", "REVERB", "STICKS", "SETUP"};
-static int page = PG_MOD, focus_mod = M_MOD;
-static int row[NPAGE];
-static int scroll[NPAGE];
+/* ================================================================ the UI: one pane, a pedalboard */
+/* Four pedals side by side (TONE, MOD, DELAY, REVERB) and a MASTER strip. Each pedal: an LCD
+ * (the algorithm and the control being set), four PERFORM knobs (on the sticks), four DEEP
+ * sliders, a MIX fader and a footswitch. Below: the selected pedal's two X/Y pads. Rarely used
+ * things (devices, save / load, the stick matrix) are in overlays opened from MASTER. */
+enum { COL_TONE, COL_MOD, COL_DELAY, COL_VERB, COL_MASTER, NCOL };
+enum { R_ALGO, R_K1, R_K2, R_K3, R_K4, R_D1, R_D2, R_D3, R_D4, R_MIX, NPROW };
+enum { MR_IN, MR_OUT, MR_DRY, MR_TEMPO, MR_ORDER, MR_SLOT, MR_SETUP, MR_STICKS, NMROW };
+enum { OV_NONE, OV_SETUP, OV_STICKS };
+enum { SR_INPUT, SR_OUTPUT, SR_SAVE, SR_LOAD, SR_FACTORY, SR_INIT, NSROW };
+#define NXROW (3 + NAX * 2 * 2)
+static int col = COL_MOD, focus_mod = M_MOD;
+static int sel[NCOL] = {R_K1, R_K1, R_K1, R_K1, MR_IN};
+static int overlay, ov_sel[3], ov_scroll[3];
 static char toast_msg[96];
 static Uint32 toast_until;
 static float sx[2], sy[2];     /* the sticks: x right, y up */
@@ -399,14 +407,6 @@ static void build_live(float dt)
     }
 }
 
-/* ---------------------------------------------------------------- rows */
-static int nrows(int pg)
-{
-    if (pg <= PG_VERB) return 2 + NPARAM;
-    if (pg == PG_STICKS) return 3 + NAX * 2 * 2;
-    return 12;
-}
-
 static int param_used(int m, int k)
 {
     const char *n = eng_info(m)->pname[base.m[m].algo][k];
@@ -434,28 +434,6 @@ static void target_name(Target t, char *o, int n)
     else {
         const char *pn = mi->pname[base.m[t.mod].algo][t.param];
         snprintf(o, n, "%s %s", mi->name, pn && *pn ? pn : "-");
-    }
-}
-
-static void setup_row_text(int r, char *label, char *val, int n)
-{
-    switch (r) {
-    case 0: snprintf(label, n, "INPUT"); snprintf(val, n, "%s", in_dev ? (*in_name ? in_name : "DEFAULT") : "NONE"); break;
-    case 1: snprintf(label, n, "OUTPUT"); snprintf(val, n, "%s", *out_name ? out_name : "DEFAULT"); break;
-    case 2: snprintf(label, n, "INPUT GAIN"); snprintf(val, n, "%+.1f dB", base.in_db); break;
-    case 3: snprintf(label, n, "OUTPUT GAIN"); snprintf(val, n, "%+.1f dB", base.out_db); break;
-    case 4: snprintf(label, n, "DRY IN RETURN"); snprintf(val, n, base.dry < 0.005f ? "OFF (SEND)" : "%.0f %%", base.dry * 100.f); break;
-    case 5: snprintf(label, n, "TEMPO"); snprintf(val, n, "%.1f BPM", base.bpm); break;
-    case 6: snprintf(label, n, "ORDER"); snprintf(val, n, "TONE>%s", eng_order_name(base.order)); break;
-    case 7: snprintf(label, n, "PRESET SLOT"); snprintf(val, n, "%d", preset_slot + 1); break;
-    case 8: snprintf(label, n, "SAVE TO SLOT"); snprintf(val, n, "A / START"); break;
-    case 9: snprintf(label, n, "LOAD SLOT"); snprintf(val, n, "A"); break;
-    case 10: {
-        Patch tmp;
-        snprintf(label, n, "FACTORY");
-        snprintf(val, n, "%d %s  (A)", factory_pick + 1, patch_factory(&tmp, factory_pick));
-    } break;
-    default: snprintf(label, n, "INIT ALL"); snprintf(val, n, "A, twice"); break;
     }
 }
 
@@ -493,84 +471,6 @@ static void save_slot(int slot)
     toast("SAVED TO SLOT %d", slot + 1);
 }
 
-static void adjust(int dir, int big)
-{
-    float step = big ? 0.05f : 0.01f;
-    if (page <= PG_VERB) {
-        int m = page;
-        ModState *ms = &base.m[m];
-        int r = row[page];
-        if (r == 0) {
-            int na = eng_info(m)->nalgo;
-            ms->algo = (ms->algo + dir + na) % na;
-        } else if (r == 1)
-            ms->mix = clampf(ms->mix + dir * step, 0.f, 1.f);
-        else {
-            int k = r - 2;
-            if (!param_used(m, k)) return;
-            ms->p[ms->algo][k] = clampf(ms->p[ms->algo][k] + dir * step, 0.f, 1.f);
-        }
-    } else if (page == PG_STICKS) {
-        int r = row[page];
-        if (r == 0) stick_matrix ^= 1;
-        else if (r == 1) stick_latch ^= 1;
-        else if (r == 2) { matrix_default(); toast("MATRIX RESET"); }
-        else {
-            int q = r - 3, ax = q / 4, s = (q / 2) % 2, isdepth = q & 1;
-            Target *t = &matrix[ax][s];
-            if (isdepth) t->depth = clampf(t->depth + dir * (big ? 0.1f : 0.05f), -1.f, 1.f);
-            else {
-                float d = t->depth;
-                Target nt = target_of((index_of(*t) + dir + NTARGET) % NTARGET);
-                nt.depth = d == 0.f ? 1.f : d;
-                *t = nt;
-            }
-        }
-    } else {
-        switch (row[page]) {
-        case 0: cycle_device(1, dir); break;
-        case 1: cycle_device(0, dir); break;
-        case 2: base.in_db = clampf(base.in_db + dir * (big ? 3.f : 0.5f), -24.f, 24.f); break;
-        case 3: base.out_db = clampf(base.out_db + dir * (big ? 3.f : 0.5f), -24.f, 24.f); break;
-        case 4: base.dry = clampf(base.dry + dir * step, 0.f, 1.f); break;
-        case 5: base.bpm = clampf(roundf(base.bpm + dir * (big ? 5.f : 1.f)), 40.f, 240.f); break;
-        case 6: base.order = (base.order + dir + NORDER) % NORDER; break;
-        case 7: preset_slot = (preset_slot + dir + 16) % 16; break;
-        case 10: factory_pick = (factory_pick + dir + NFACTORY) % NFACTORY; break;
-        default: break;
-        }
-    }
-    changed();
-}
-
-static int init_armed;
-static void press_a(void)
-{
-    if (page <= PG_VERB) {
-        base.m[page].bypass ^= 1;
-        toast("%s %s", eng_info(page)->name, base.m[page].bypass ? "BYPASSED" : "ON");
-        changed();
-        return;
-    }
-    if (page == PG_SETUP) {
-        switch (row[page]) {
-        case 8: save_slot(preset_slot); break;
-        case 9: load_slot(preset_slot); break;
-        case 10: {
-            const char *nm = patch_factory(&base, factory_pick);
-            snprintf(patch_name, sizeof patch_name, "%s", nm);
-            matrix_default();
-            toast("FACTORY: %s", nm);
-            changed();
-        } break;
-        case 11:
-            if (init_armed) { patch_default(&base); matrix_default(); snprintf(patch_name, sizeof patch_name, "INIT"); toast("ALL BACK TO INIT"); init_armed = 0; changed(); }
-            else { init_armed = 1; toast("PRESS A AGAIN TO RESET EVERYTHING"); }
-            break;
-        }
-    }
-}
-
 static void tap_tempo(void)
 {
     float t = SDL_GetTicks() / 1000.f;
@@ -601,11 +501,130 @@ static void load_factory_or_slot(int dir)
     }
 }
 
+static int rows_now(void)
+{
+    if (overlay == OV_SETUP) return NSROW;
+    if (overlay == OV_STICKS) return NXROW;
+    return col == COL_MASTER ? NMROW : NPROW;
+}
+static int *sel_now(void) { return overlay ? &ov_sel[overlay] : &sel[col]; }
+
+static void set_col(int c)
+{
+    col = (c + NCOL) % NCOL;
+    if (col < COL_MASTER) focus_mod = col;
+}
+
+/* ---------------------------------------------------------------- turning things */
+static int init_armed;
+
+static void adjust(int dir, int big)
+{
+    float step = big ? 0.05f : 0.01f;
+    if (overlay == OV_SETUP) {
+        switch (ov_sel[OV_SETUP]) {
+        case SR_INPUT: cycle_device(1, dir); break;
+        case SR_OUTPUT: cycle_device(0, dir); break;
+        case SR_SAVE: case SR_LOAD: preset_slot = (preset_slot + dir + 16) % 16; break;
+        case SR_FACTORY: factory_pick = (factory_pick + dir + NFACTORY) % NFACTORY; break;
+        default: break;
+        }
+        changed();
+        return;
+    }
+    if (overlay == OV_STICKS) {
+        int r = ov_sel[OV_STICKS];
+        if (r == 0) stick_matrix ^= 1;
+        else if (r == 1) stick_latch ^= 1;
+        else if (r == 2) { matrix_default(); toast("MATRIX RESET"); }
+        else {
+            int q = r - 3, ax = q / 4, s = (q / 2) % 2, isdepth = q & 1;
+            Target *t = &matrix[ax][s];
+            if (isdepth) t->depth = clampf(t->depth + dir * (big ? 0.1f : 0.05f), -1.f, 1.f);
+            else {
+                float d = t->depth;
+                Target nt = target_of((index_of(*t) + dir + NTARGET) % NTARGET);
+                nt.depth = d == 0.f ? 1.f : d;
+                *t = nt;
+            }
+        }
+        changed();
+        return;
+    }
+    if (col == COL_MASTER) {
+        switch (sel[col]) {
+        case MR_IN: base.in_db = clampf(base.in_db + dir * (big ? 3.f : 0.5f), -24.f, 24.f); break;
+        case MR_OUT: base.out_db = clampf(base.out_db + dir * (big ? 3.f : 0.5f), -24.f, 24.f); break;
+        case MR_DRY: base.dry = clampf(base.dry + dir * step, 0.f, 1.f); break;
+        case MR_TEMPO: base.bpm = clampf(roundf(base.bpm + dir * (big ? 5.f : 1.f)), 40.f, 240.f); break;
+        case MR_ORDER: base.order = (base.order + dir + NORDER) % NORDER; break;
+        case MR_SLOT: load_factory_or_slot(dir); return;
+        default: return;
+        }
+        changed();
+        return;
+    }
+    int m = col;
+    ModState *ms = &base.m[m];
+    int r = sel[col];
+    if (r == R_ALGO) {
+        int na = eng_info(m)->nalgo;
+        ms->algo = (ms->algo + dir + na) % na;
+    } else if (r == R_MIX)
+        ms->mix = clampf(ms->mix + dir * step, 0.f, 1.f);
+    else {
+        int k = r - R_K1;
+        if (!param_used(m, k)) return;
+        ms->p[ms->algo][k] = clampf(ms->p[ms->algo][k] + dir * step, 0.f, 1.f);
+    }
+    changed();
+}
+
+static void press_a(void)
+{
+    if (overlay == OV_SETUP) {
+        switch (ov_sel[OV_SETUP]) {
+        case SR_SAVE: save_slot(preset_slot); break;
+        case SR_LOAD: load_slot(preset_slot); break;
+        case SR_FACTORY: {
+            const char *nm = patch_factory(&base, factory_pick);
+            snprintf(patch_name, sizeof patch_name, "%s", nm);
+            matrix_default();
+            toast("FACTORY: %s", nm);
+            changed();
+        } break;
+        case SR_INIT:
+            if (init_armed) { patch_default(&base); matrix_default(); snprintf(patch_name, sizeof patch_name, "INIT"); toast("ALL BACK TO INIT"); init_armed = 0; changed(); return; }
+            init_armed = 1;
+            toast("PRESS A AGAIN TO RESET EVERYTHING");
+            return;
+        }
+        return;
+    }
+    if (overlay == OV_STICKS) { adjust(1, 0); return; }
+    if (col == COL_MASTER) {
+        if (sel[col] == MR_SETUP) overlay = OV_SETUP;
+        else if (sel[col] == MR_STICKS) overlay = OV_STICKS;
+        else if (sel[col] == MR_SLOT) save_slot(preset_slot);
+        return;
+    }
+    /* the footswitch */
+    base.m[col].bypass ^= 1;
+    toast("%s %s", eng_info(col)->name, base.m[col].bypass ? "BYPASSED" : "ON");
+    changed();
+}
+
 /* ---------------------------------------------------------------- input */
 static int held[BI_COUNT];
 static Uint32 rep_at[BI_COUNT];
 static int rep_n[BI_COUNT];
 static int running = 1;
+
+static void move_row(int dir)
+{
+    int *s = sel_now(), n = rows_now();
+    *s = (*s + dir + n) % n;
+}
 
 static void button(BiButton b, int down)
 {
@@ -613,13 +632,16 @@ static void button(BiButton b, int down)
     if (!down) return;
     rep_at[b] = SDL_GetTicks() + 350;
     rep_n[b] = 0;
+    if (b != BI_A) init_armed = 0;
     switch (b) {
-    case BI_UP: row[page] = (row[page] - 1 + nrows(page)) % nrows(page); break;
-    case BI_DOWN: row[page] = (row[page] + 1) % nrows(page); break;
+    case BI_UP: move_row(-1); break;
+    case BI_DOWN: move_row(+1); break;
     case BI_LEFT: adjust(-1, 0); break;
     case BI_RIGHT: adjust(+1, 0); break;
-    case BI_L1: page = (page - 1 + NPAGE) % NPAGE; if (page <= PG_VERB) focus_mod = page; break;
-    case BI_R1: page = (page + 1) % NPAGE; if (page <= PG_VERB) focus_mod = page; break;
+    case BI_L1: case BI_R1:
+        if (overlay) overlay = overlay == OV_SETUP ? OV_STICKS : OV_SETUP;
+        else set_col(col + (b == BI_R1 ? 1 : -1));
+        break;
     case BI_L2: case BI_R2: {
         int m = focus_mod, na = eng_info(m)->nalgo;
         base.m[m].algo = (base.m[m].algo + (b == BI_R2 ? 1 : -1) + na) % na;
@@ -627,7 +649,10 @@ static void button(BiButton b, int down)
         changed();
     } break;
     case BI_A: press_a(); break;
-    case BI_B: stick_matrix ^= 1; toast("STICKS: %s", stick_matrix ? "MATRIX" : "FOCUS"); changed(); break;
+    case BI_B:
+        if (overlay) overlay = OV_NONE;
+        else { stick_matrix ^= 1; toast("STICKS: %s", stick_matrix ? "MATRIX" : "FOCUS"); changed(); }
+        break;
     case BI_X: stick_latch ^= 1; toast("STICKS: %s", stick_latch ? "LATCH" : "SPRING"); changed(); break;
     case BI_Y:
         hold_on ^= 1;
@@ -640,10 +665,10 @@ static void button(BiButton b, int down)
     case BI_R3: base.freeze_verb ^= 1; toast("REVERB %s", base.freeze_verb ? "FROZEN" : "FLOWING"); break;
     case BI_F1: load_factory_or_slot(-1); break;
     case BI_F2: load_factory_or_slot(+1); break;
+    case BI_HOME: overlay = overlay ? OV_NONE : OV_SETUP; break;
     case BI_MENU: running = 0; break;
     default: break;
     }
-    if (b != BI_UP && b != BI_DOWN && b != BI_LEFT && b != BI_RIGHT) init_armed = init_armed && b == BI_A;
 }
 
 static void repeats(void)
@@ -655,9 +680,9 @@ static void repeats(void)
         if (!held[b] || now < rep_at[b]) continue;
         rep_n[b]++;
         rep_at[b] = now + (rep_n[b] > 12 ? 30 : 70);
-        if (b == BI_UP) row[page] = (row[page] - 1 + nrows(page)) % nrows(page);
-        else if (b == BI_DOWN) row[page] = (row[page] + 1) % nrows(page);
-        else if (!(page == PG_SETUP && row[page] <= 1)) adjust(b == BI_LEFT ? -1 : 1, rep_n[b] > 12);
+        if (b == BI_UP || b == BI_DOWN) move_row(b == BI_UP ? -1 : 1);
+        else if (!(overlay == OV_SETUP && ov_sel[OV_SETUP] <= SR_OUTPUT) && !(col == COL_MASTER && !overlay && sel[col] == MR_SLOT))
+            adjust(b == BI_LEFT ? -1 : 1, rep_n[b] > 12);
     }
 }
 
@@ -688,7 +713,7 @@ static void keyboard(const SDL_Event *e)
     case SDLK_g: b = BI_R3; break;
     case SDLK_5: b = BI_F1; break;
     case SDLK_6: b = BI_F2; break;
-    /* i j k l: the left stick, numpad 8 4 2 6 / t f g h: the right */
+    case SDLK_h: b = BI_HOME; break;
     case SDLK_i: sy[0] = down ? 1.f : 0.f; return;
     case SDLK_k: sy[0] = down ? -1.f : 0.f; return;
     case SDLK_j: sx[0] = down ? -1.f : 0.f; return;
@@ -703,17 +728,19 @@ static void keyboard(const SDL_Event *e)
 }
 
 /* ================================================================ drawing */
-#define C_BG 0x0b0d14
-#define C_PANEL 0x161a26
-#define C_PANEL2 0x1e2333
-#define C_LINE 0x2c3348
-#define C_TEXT 0xdfe3ee
-#define C_DIM 0x7d8599
-#define C_ACC 0x8a7dff   /* violet */
+#define C_BG 0x0a0b10
+#define C_PANEL 0x15171f
+#define C_PANEL2 0x1d2030
+#define C_LINE 0x2c3044
+#define C_TEXT 0xe4e7f0
+#define C_DIM 0x7c8398
+#define C_ACC 0x8a7dff
 #define C_WARM 0xffb45a
 #define C_COOL 0x5ad1ff
 #define C_GOOD 0x6ee7a0
 #define C_BAD 0xff5a6e
+#define C_LCD 0x0c1a14
+#define C_LCDTXT 0x9df2c4
 static const uint32_t MODCOL[NMOD] = {0xffb45a, 0xc77dff, 0x5ad1ff, 0x6ee7a0};
 static const uint32_t AXCOL[NAX] = {0xff7ab6, 0xffd15a, 0x5ad1ff, 0x8affc1};
 static const char *const AXN[NAX] = {"LX", "LY", "RX", "RY"};
@@ -737,7 +764,7 @@ static void meter_v(int x, int y, int w, int h, float lin, uint32_t c)
 }
 
 /* an X/Y pad: the stored setting as a ring, where the sticks have it as a dot, a line between */
-static void xy_pad(int x, int y, int sz, float bx, float by, float lx, float ly, uint32_t col, const char *xl, const char *yl, int big)
+static void xy_pad(int x, int y, int sz, float bx, float by, float lx, float ly, uint32_t col_, const char *xl, const char *yl, int big)
 {
     gfx_fill(x, y, sz, sz, 0x0e1119);
     gfx_rect(x, y, sz, sz, 1, C_LINE);
@@ -747,265 +774,358 @@ static void xy_pad(int x, int y, int sz, float bx, float by, float lx, float ly,
     }
     float px = x + 6 + bx * (sz - 12), py = y + sz - 6 - by * (sz - 12);
     float qx = x + 6 + lx * (sz - 12), qy = y + sz - 6 - ly * (sz - 12);
-    /* crosshair at the live position */
-    gfx_fill_a((int)qx, y + 1, 1, sz - 2, col, 70);
-    gfx_fill_a(x + 1, (int)qy, sz - 2, 1, col, 70);
-    if (fabsf(px - qx) > 1.f || fabsf(py - qy) > 1.f) gfx_line(px, py, qx, qy, big ? 2.f : 1.2f, gfx_mix(C_LINE, col, 0.6f));
-    gfx_ring(px, py, big ? 9.f : 5.f, big ? 2.f : 1.5f, gfx_mix(C_DIM, col, 0.3f));
-    gfx_disc(qx, qy, big ? 8.f : 4.f, col);
-    if (big) {
-        gfx_text(x + 6, y + sz + 4, xl, C_DIM, FONT_SMALL);
-        char yb[40];
-        snprintf(yb, sizeof yb, "%s", yl);
-        text_r(x + sz - 4, y + sz + 4, yb, C_DIM, FONT_SMALL);
+    gfx_fill_a((int)qx, y + 1, 1, sz - 2, col_, 70);
+    gfx_fill_a(x + 1, (int)qy, sz - 2, 1, col_, 70);
+    if (fabsf(px - qx) > 1.f || fabsf(py - qy) > 1.f) gfx_line(px, py, qx, qy, big ? 2.f : 1.2f, gfx_mix(C_LINE, col_, 0.6f));
+    gfx_ring(px, py, big ? 8.f : 5.f, big ? 2.f : 1.5f, gfx_mix(C_DIM, col_, 0.3f));
+    gfx_disc(qx, qy, big ? 7.f : 4.f, col_);
+    if (big && xl && *xl) {
+        gfx_text(x + 4, y + sz + 2, xl, C_DIM, FONT_SMALL);
+        text_r(x + sz - 2, y - 22, yl, C_DIM, FONT_SMALL);
     }
+}
+
+/* ---------------------------------------------------------------- knobs and sliders */
+#define KNOB_A0 (0.75f * TFX_PI)   /* 7:30 */
+#define KNOB_SPAN (1.5f * TFX_PI)  /* to 4:30 */
+
+static void knob_pt(float cx, float cy, float r, float v, float *x, float *y)
+{
+    float a = KNOB_A0 + KNOB_SPAN * v;
+    *x = cx + r * cosf(a);
+    *y = cy + r * sinf(a);
+}
+
+static void knob(int cx, int cy, int r, float stored, float lv, uint32_t col_, uint32_t axc, int used, int selected)
+{
+    /* the track, the stored value's arc, the live value's marker */
+    for (int i = 0; i <= 40; i++) {
+        float v = i / 40.f, x, y;
+        knob_pt(cx, cy, r + 7, v, &x, &y);
+        gfx_disc(x, y, 2.2f, used && v <= stored + 0.001f ? col_ : C_LINE);
+    }
+    gfx_disc(cx, cy, r, used ? 0x2a2e40 : 0x1a1c26);
+    gfx_ring(cx, cy, r, 2.f, used ? 0x3a3f56 : C_LINE);
+    gfx_disc(cx, cy, r - 7, used ? 0x20232f : 0x17181f);
+    if (!used) return;
+    float px, py, qx, qy;
+    knob_pt(cx, cy, r - 4, lv, &px, &py);
+    knob_pt(cx, cy, r * 0.25f, lv, &qx, &qy);
+    gfx_line(qx, qy, px, py, 3.f, C_TEXT);
+    if (fabsf(lv - stored) > 0.004f) {
+        float mx, my;
+        knob_pt(cx, cy, r + 7, lv, &mx, &my);
+        gfx_disc(mx, my, 5.f, axc);
+    }
+    if (selected) gfx_ring(cx, cy, r + 13, 2.f, C_TEXT);
+}
+
+static void hslider(int x, int y, int w, float stored, float lv, uint32_t col_, uint32_t axc, int thick)
+{
+    gfx_fill(x, y, w, thick, 0x0e1119);
+    gfx_fill(x, y, (int)(w * stored), thick, gfx_mix(C_LINE, col_, 0.7f));
+    gfx_fill(x + (int)(w * stored) - 2, y - 3, 4, thick + 6, col_);
+    if (fabsf(lv - stored) > 0.004f) gfx_fill(x + (int)(w * lv) - 2, y - 5, 4, thick + 10, axc);
+}
+
+/* which stick axis moves parameter k of module m now (NULL: none) */
+static const char *axis_of(int m, int k, uint32_t *c)
+{
+    if (!stick_matrix) {
+        if (m == focus_mod && k < 4) { *c = AXCOL[k]; return AXN[k]; }
+        return NULL;
+    }
+    for (int ax = 0; ax < NAX; ax++)
+        for (int s = 0; s < 2; s++)
+            if (matrix[ax][s].mod == m && matrix[ax][s].param == k) { *c = AXCOL[ax]; return AXN[ax]; }
+    return NULL;
+}
+
+#define PED_W 200
+#define PED_Y 54
+#define PED_H 560
+
+static void pedal(int x, int m)
+{
+    const ModInfo *mi = eng_info(m);
+    const ModState *ms = &base.m[m];
+    int a = ms->algo, on = !ms->bypass, focused = col == m && !overlay, s = sel[m];
+    uint32_t c = MODCOL[m], body = gfx_mix(C_PANEL, c, focused ? 0.10f : 0.05f);
+    int y = PED_Y;
+    gfx_fill(x, y, PED_W, PED_H, body);
+    gfx_rect(x, y, PED_W, PED_H, focused ? 3 : 1, focused ? c : C_LINE);
+    /* screws, for the look of a box */
+    gfx_disc(x + 9, y + 9, 3.f, C_LINE); gfx_disc(x + PED_W - 9, y + 9, 3.f, C_LINE);
+    gfx_disc(x + 9, y + PED_H - 9, 3.f, C_LINE); gfx_disc(x + PED_W - 9, y + PED_H - 9, 3.f, C_LINE);
+    text_c(x + PED_W / 2, y + 6, mi->name, on ? c : C_DIM, FONT_SMALL);
+
+    /* the LCD: the algorithm, and what is being set */
+    int ly = y + 30;
+    gfx_fill(x + 10, ly, PED_W - 20, 54, C_LCD);
+    gfx_rect(x + 10, ly, PED_W - 20, 54, 1, focused && s == R_ALGO ? C_TEXT : 0x1c3328);
+    char b[64], v[48];
+    snprintf(b, sizeof b, "%s", mi->algo[a]);
+    fit(b, PED_W - 60);
+    gfx_text(x + 16, ly + 4, b, C_LCDTXT, FONT_SMALL);
+    snprintf(v, sizeof v, "%d/%d", a + 1, mi->nalgo);
+    text_r(x + PED_W - 16, ly + 4, v, 0x4f8a6a, FONT_SMALL);
+    if (focused && s >= R_K1 && s <= R_D4 && param_used(m, s - R_K1)) {
+        int k = s - R_K1;
+        mi->fmt(a, k, live.m[m].p[a][k], &live, v, sizeof v);
+        snprintf(b, sizeof b, "%s %s", mi->pname[a][k], v);
+    } else if (focused && s == R_MIX)
+        snprintf(b, sizeof b, "MIX %.0f%%", live.m[m].mix * 100.f);
+    else
+        snprintf(b, sizeof b, "%s", mi->blurb[a]);
+    fit(b, PED_W - 30);
+    gfx_text(x + 16, ly + 28, b, focused ? C_LCDTXT : 0x5f9c7c, FONT_SMALL);
+
+    /* four PERFORM knobs */
+    for (int k = 0; k < 4; k++) {
+        int cx = x + PED_W / 4 + (k & 1) * PED_W / 2, cy = y + 124 + (k >> 1) * 114;
+        int used = param_used(m, k);
+        uint32_t axc = c;
+        const char *ax = axis_of(m, k, &axc);
+        knob(cx, cy, 26, ms->p[a][k], live.m[m].p[a][k], on ? c : C_DIM, axc, used, focused && s == R_K1 + k);
+        snprintf(b, sizeof b, "%s", used ? mi->pname[a][k] : "-");
+        fit(b, ax ? PED_W / 2 - 30 : PED_W / 2 - 4);
+        int tw = gfx_text_w(b, FONT_SMALL) + (ax ? 26 : 0), tx = cx - tw / 2;
+        if (ax) { /* the stick axis that moves it, as a tag before its name */
+            gfx_fill(tx - 2, cy + 36, 24, 19, gfx_mix(body, axc, 0.45f));
+            gfx_text(tx + 1, cy + 34, ax, axc, FONT_SMALL);
+            tx += 26;
+        }
+        gfx_text(tx, cy + 34, b, focused && s == R_K1 + k ? C_TEXT : C_DIM, FONT_SMALL);
+        if (used) {
+            mi->fmt(a, k, live.m[m].p[a][k], &live, v, sizeof v);
+            fit(v, PED_W / 2 - 4);
+            text_c(cx, cy + 52, v, on ? gfx_mix(C_DIM, c, 0.6f) : C_LINE, FONT_SMALL);
+        }
+    }
+
+    /* four DEEP sliders */
+    for (int k = 4; k < 8; k++) {
+        int sy_ = y + 318 + (k - 4) * 35, used = param_used(m, k), here = focused && s == R_K1 + k;
+        if (here) gfx_fill(x + 6, sy_ - 2, PED_W - 12, 34, C_PANEL2);
+        snprintf(b, sizeof b, "%s", used ? mi->pname[a][k] : "-");
+        fit(b, 96);
+        gfx_text(x + 14, sy_, b, here ? C_TEXT : C_DIM, FONT_SMALL);
+        if (!used) continue;
+        mi->fmt(a, k, live.m[m].p[a][k], &live, v, sizeof v);
+        fit(v, 86);
+        text_r(x + PED_W - 12, sy_, v, here ? C_TEXT : C_DIM, FONT_SMALL);
+        uint32_t axc = c;
+        axis_of(m, k, &axc);
+        hslider(x + 14, sy_ + 23, PED_W - 28, ms->p[a][k], live.m[m].p[a][k], on ? c : C_DIM, axc, 4);
+    }
+
+    /* the MIX fader */
+    int my = y + 466 + 2;
+    if (focused && s == R_MIX) gfx_fill(x + 6, my - 4, PED_W - 12, 38, C_PANEL2);
+    gfx_text(x + 14, my - 2, "MIX", focused && s == R_MIX ? C_TEXT : C_DIM, FONT_SMALL);
+    snprintf(v, sizeof v, ms->mix >= 0.999f ? "WET" : "%.0f%%", live.m[m].mix * 100.f);
+    uint32_t axc = c;
+    axis_of(m, -1, &axc);
+    hslider(x + 56, my + 6, PED_W - 120, ms->mix, live.m[m].mix, on ? c : C_DIM, axc, 8);
+    text_r(x + PED_W - 12, my - 2, v, focused && s == R_MIX ? C_TEXT : C_DIM, FONT_SMALL);
+
+    /* the footswitch and its light */
+    int fy = y + 526;
+    int frozen = (m == M_DELAY && base.freeze_dly) || (m == M_VERB && base.freeze_verb);
+    gfx_disc(x + PED_W / 2, fy, 19.f, 0x30344a);
+    gfx_ring(x + PED_W / 2, fy, 19.f, 3.f, 0x8a90a8);
+    gfx_disc(x + PED_W / 2, fy, 12.f, 0x4a4f66);
+    uint32_t led = frozen ? C_COOL : on ? c : 0x3a1a20;
+    gfx_disc(x + 26, fy, 8.f, led);
+    if (on) gfx_ring(x + 26, fy, 12.f, 2.f, gfx_mix(body, led, 0.5f));
+    gfx_text(x + PED_W - 74, fy - 11, frozen ? "FREEZE" : on ? "ON" : "BYPASS", frozen ? C_COOL : on ? c : C_BAD, FONT_SMALL);
+    /* its level */
+    float t = clampf((lin2db(vu_mod[m] + 1e-9f) + 48.f) / 48.f, 0.f, 1.f);
+    gfx_fill(x + 14, y + PED_H - 9, PED_W - 28, 3, 0x0e1119);
+    gfx_fill(x + 14, y + PED_H - 9, (int)((PED_W - 28) * t), 3, on ? c : C_LINE);
+}
+
+static void master_strip(int x, int w)
+{
+    int focused = col == COL_MASTER && !overlay, y = PED_Y;
+    gfx_fill(x, y, w, PED_H, C_PANEL);
+    gfx_rect(x, y, w, PED_H, focused ? 3 : 1, focused ? C_ACC : C_LINE);
+    text_c(x + w / 2, y + 6, "MASTER", focused ? C_ACC : C_DIM, FONT_SMALL);
+    for (int r = 0; r < NMROW; r++) {
+        int ry = y + 34 + r * 54, here = focused && sel[COL_MASTER] == r;
+        if (here) gfx_fill(x + 4, ry - 2, w - 8, 50, C_PANEL2);
+        char lab[24], v[48];
+        float bar = -1.f;
+        switch (r) {
+        case MR_IN: snprintf(lab, sizeof lab, "IN"); snprintf(v, sizeof v, "%+.1f dB", base.in_db); bar = (base.in_db + 24.f) / 48.f; break;
+        case MR_OUT: snprintf(lab, sizeof lab, "OUT"); snprintf(v, sizeof v, "%+.1f dB", base.out_db); bar = (base.out_db + 24.f) / 48.f; break;
+        case MR_DRY: snprintf(lab, sizeof lab, "DRY"); snprintf(v, sizeof v, base.dry < 0.005f ? "OFF" : "%.0f%%", base.dry * 100.f); bar = base.dry; break;
+        case MR_TEMPO: snprintf(lab, sizeof lab, "TEMPO"); snprintf(v, sizeof v, "%.0f", base.bpm); bar = (base.bpm - 40.f) / 200.f; break;
+        case MR_ORDER: snprintf(lab, sizeof lab, "ORDER"); snprintf(v, sizeof v, "%s", eng_order_name(base.order)); break;
+        case MR_SLOT: snprintf(lab, sizeof lab, "PRESET"); snprintf(v, sizeof v, "%d", preset_slot + 1); break;
+        case MR_SETUP: snprintf(lab, sizeof lab, "SETUP"); snprintf(v, sizeof v, "A >"); break;
+        default: snprintf(lab, sizeof lab, "STICKS"); snprintf(v, sizeof v, "A >"); break;
+        }
+        gfx_text(x + 10, ry, lab, here ? C_TEXT : C_DIM, FONT_SMALL);
+        if (r == MR_ORDER) { fit(v, w - 16); gfx_text(x + 10, ry + 22, v, here ? C_TEXT : C_DIM, FONT_SMALL); }
+        else text_r(x + w - 8, ry, v, here ? C_TEXT : C_DIM, FONT_SMALL);
+        if (bar >= 0.f) hslider(x + 10, ry + 30, w - 20, bar, bar, C_ACC, C_ACC, 4);
+        if (r == MR_SLOT) { char nm[48]; snprintf(nm, sizeof nm, "%s", patch_name); fit(nm, w - 16); gfx_text(x + 10, ry + 22, nm, C_DIM, FONT_SMALL); }
+    }
+    /* the levels */
+    int my = y + 34 + NMROW * 54 + 4, mh = PED_H - (my - y) - 14;
+    meter_v(x + 14, my, 12, mh, vu_in[0], C_COOL);
+    meter_v(x + 30, my, 12, mh, vu_in[1], C_COOL);
+    meter_v(x + w - 42, my, 12, mh, vu_out[0], C_GOOD);
+    meter_v(x + w - 26, my, 12, mh, vu_out[1], C_GOOD);
+    text_c(x + w / 2, my + mh / 2 - 22, "IN", C_DIM, FONT_SMALL);
+    text_c(x + w / 2, my + mh / 2 + 2, "OUT", C_DIM, FONT_SMALL);
 }
 
 static void draw_top(void)
 {
-    gfx_fill(0, 0, W, 52, C_PANEL);
-    gfx_text(16, 8, "TRIMFX", C_ACC, FONT_LARGE);
-    int x = 150;
-    for (int p = 0; p < NPAGE; p++) {
-        int w = gfx_text_w(PAGE_N[p], FONT_SMALL) + 22;
-        uint32_t c = p <= PG_VERB ? MODCOL[p] : C_TEXT;
-        if (p == page) gfx_fill(x, 8, w, 36, gfx_mix(C_PANEL, c, 0.25f)), gfx_fill(x, 40, w, 4, c);
-        gfx_text(x + 11, 15, PAGE_N[p], p == page ? C_TEXT : C_DIM, FONT_SMALL);
-        x += w + 4;
-    }
+    gfx_fill(0, 0, W, 46, C_PANEL);
+    gfx_text(14, 5, "TRIMFX", C_ACC, FONT_LARGE);
     char b[96];
-    snprintf(b, sizeof b, "%d %s", preset_slot + 1, patch_name);
-    fit(b, 220);
-    text_r(W - 120, 6, b, C_TEXT, FONT_SMALL);
-    snprintf(b, sizeof b, "%.0f BPM  %s%s", base.bpm, stick_matrix ? "MATRIX" : "FOCUS", stick_latch ? "/LATCH" : "/SPRING");
-    text_r(W - 120, 27, b, C_DIM, FONT_SMALL);
-    meter_v(W - 100, 8, 8, 36, vu_in[0], C_COOL);
-    meter_v(W - 90, 8, 8, 36, vu_in[1], C_COOL);
-    meter_v(W - 30, 8, 8, 36, vu_out[0], C_GOOD);
-    meter_v(W - 20, 8, 8, 36, vu_out[1], C_GOOD);
-    gfx_text(W - 78, 8, "IN", C_DIM, FONT_SMALL);
-    gfx_text(W - 78, 26, "OUT", C_DIM, FONT_SMALL);
+    snprintf(b, sizeof b, "%d  %s", preset_slot + 1, patch_name);
+    fit(b, 300);
+    gfx_text(130, 12, b, C_TEXT, FONT_SMALL);
+    snprintf(b, sizeof b, "%.0f BPM", base.bpm);
+    gfx_text(450, 12, b, C_DIM, FONT_SMALL);
+    snprintf(b, sizeof b, "STICKS %s %s%s", stick_matrix ? "MATRIX" : "FOCUS", stick_latch ? "LATCH" : "SPRING", hold_on ? " HELD" : "");
+    text_r(W - 16, 12, b, hold_on ? C_WARM : C_DIM, FONT_SMALL);
+    if (!in_dev) gfx_text(560, 12, "NO INPUT", C_BAD, FONT_SMALL);
 }
 
-/* the chain: each module's box with its algorithm, mix, and a small X/Y of where its sticks are */
-static void draw_chain(void)
+/* below the board: the selected pedal's two X/Y pads, and what the buttons do */
+static void draw_bottom(void)
 {
-    int ord[4] = {M_TONE, 0, 0, 0};
-    eng_order(base.order, ord + 1);
-    int x = 16, y = 60, bw = 236, bh = 100;
-    for (int k = 0; k < 4; k++) {
-        int m = ord[k];
-        const ModInfo *mi = eng_info(m);
-        int on = !base.m[m].bypass, sel = focus_mod == m;
-        uint32_t c = MODCOL[m];
-        gfx_fill(x, y, bw, bh, sel ? C_PANEL2 : C_PANEL);
-        gfx_fill(x, y, 4, bh, on ? c : C_LINE);
-        if (sel) gfx_rect(x, y, bw, bh, 2, gfx_mix(C_PANEL, c, 0.7f));
-        gfx_text(x + 12, y + 6, mi->name, on ? c : C_DIM, FONT_SMALL);
-        char b[64];
-        snprintf(b, sizeof b, "%s", mi->algo[base.m[m].algo]);
-        fit(b, 140);
-        gfx_text(x + 12, y + 30, b, on ? C_TEXT : C_DIM, FONT_SMALL);
-        snprintf(b, sizeof b, on ? "MIX %3.0f%%" : "BYPASS", live.m[m].mix * 100.f);
-        gfx_text(x + 12, y + 54, b, on ? C_DIM : C_BAD, FONT_SMALL);
-        if ((m == M_DELAY && base.freeze_dly) || (m == M_VERB && base.freeze_verb)) gfx_text(x + 12, y + 76, "FROZEN", C_COOL, FONT_SMALL);
-        else {
-            /* the level out of this module */
-            float t = clampf((lin2db(vu_mod[m] + 1e-9f) + 48.f) / 48.f, 0.f, 1.f);
-            gfx_fill(x + 12, y + 84, 130, 5, 0x0e1119);
-            gfx_fill(x + 12, y + 84, (int)(130 * t), 5, on ? c : C_LINE);
-        }
-        /* two mini X/Y pads: (P1, P2) and (P3, P4) */
-        int a = base.m[m].algo;
-        const float *bp = base.m[m].p[a], *lp = live.m[m].p[a];
-        xy_pad(x + bw - 84, y + 8, 40, bp[0], bp[1], lp[0], lp[1], c, "", "", 0);
-        xy_pad(x + bw - 42, y + 8, 40, bp[2], bp[3], lp[2], lp[3], c, "", "", 0);
-        if (k < 3) gfx_tri(x + bw + 2, y + bh / 2 - 6, x + bw + 2, y + bh / 2 + 6, x + bw + 9, y + bh / 2, C_DIM);
-        x += bw + 12;
-    }
-}
-
-static void draw_row(int y, int sel, const char *label, const char *val, float bar, uint32_t col, uint32_t ax_col, const char *axn,
-                     float live_bar)
-{
-    gfx_fill(16, y, 584, 34, sel ? C_PANEL2 : C_PANEL);
-    if (sel) gfx_fill(16, y, 4, 34, col);
-    gfx_text(30, y + 6, label, sel ? C_TEXT : C_DIM, FONT_SMALL);
-    if (axn) {
-        gfx_fill(176, y + 7, 30, 20, gfx_mix(C_PANEL, ax_col, 0.35f));
-        text_c(191, y + 6, axn, ax_col, FONT_SMALL);
-    }
-    if (bar >= 0.f) {
-        int bx = 216, bwid = 200;
-        gfx_fill(bx, y + 14, bwid, 6, 0x0e1119);
-        gfx_fill(bx, y + 14, (int)(bwid * bar), 6, gfx_mix(C_LINE, col, 0.55f));
-        if (live_bar >= 0.f && fabsf(live_bar - bar) > 0.004f) {
-            gfx_fill(bx + (int)(bwid * live_bar) - 2, y + 9, 4, 16, ax_col);
-        }
-        gfx_fill(bx + (int)(bwid * bar) - 1, y + 10, 2, 14, col);
-    }
-    char v[64];
-    snprintf(v, sizeof v, "%s", val);
-    fit(v, 170);
-    text_r(592, y + 6, v, sel ? C_TEXT : C_DIM, FONT_SMALL);
-}
-
-static void draw_module_page(int m)
-{
+    int y = PED_Y + PED_H + 30, m = focus_mod, a = base.m[m].algo, sz = H - y - 6;
     const ModInfo *mi = eng_info(m);
-    const ModState *ms = &base.m[m];
-    int a = ms->algo, y0 = 172;
-    uint32_t col = MODCOL[m];
-    char v[64];
-    snprintf(v, sizeof v, "%d/%d  %s", a + 1, mi->nalgo, mi->algo[a]);
-    draw_row(y0, row[page] == 0, "ALGORITHM", v, -1.f, col, 0, NULL, -1.f);
-    snprintf(v, sizeof v, ms->mix >= 0.999f ? "100%% WET" : "%.0f %%", live.m[m].mix * 100.f);
-    draw_row(y0 + 38, row[page] == 1, "MIX", v, ms->mix, col, C_TEXT, NULL, live.m[m].mix);
-    for (int k = 0; k < NPARAM; k++) {
-        const char *pn = mi->pname[a][k];
-        int y = y0 + 76 + k * 38 + (k >= 4 ? 8 : 0);
-        if (!pn || !*pn) {
-            draw_row(y, row[page] == 2 + k, "-", "", -1.f, col, 0, NULL, -1.f);
-            continue;
-        }
-        float lv = live.m[m].p[a][k];
-        mi->fmt(a, k, lv, &live, v, sizeof v);
-        /* which stick axis moves it (FOCUS mode: the first four are the PERFORM set) */
-        const char *axn = NULL;
-        uint32_t axc = 0;
-        if (!stick_matrix && k < 4) axn = AXN[k], axc = AXCOL[k];
-        else if (stick_matrix)
-            for (int ax = 0; ax < NAX && !axn; ax++)
-                for (int s = 0; s < 2; s++)
-                    if (matrix[ax][s].mod == m && matrix[ax][s].param == k) { axn = AXN[ax]; axc = AXCOL[ax]; break; }
-        draw_row(y, row[page] == 2 + k, pn, v, ms->p[a][k], col, axc ? axc : col, axn, lv);
-    }
-    gfx_text(30, y0 + 76 + 4 * 38 - 4, "", C_DIM, FONT_SMALL);
-    /* the right side: what it is, and the two X/Y pads */
-    int rx = 616;
-    gfx_fill(rx, y0, 392, 72, C_PANEL);
-    gfx_text(rx + 12, y0 + 6, mi->algo[a], col, FONT_LARGE);
-    char bl[64];
-    snprintf(bl, sizeof bl, "%s", mi->blurb[a]);
-    fit(bl, 372);
-    gfx_text(rx + 12, y0 + 44, bl, C_DIM, FONT_SMALL);
-    const float *bp = ms->p[a], *lp = live.m[m].p[a];
+    const float *bp = base.m[m].p[a], *lp = live.m[m].p[a];
+    uint32_t c = MODCOL[m];
     char xl[40], yl[40];
-    int py = y0 + 92, sz = 186;
     for (int s = 0; s < 2; s++) {
-        int px = rx + s * (sz + 20);
-        snprintf(xl, sizeof xl, "%s>%s", s ? "RX" : "LX", mi->pname[a][2 * s]);
-        snprintf(yl, sizeof yl, "%s^%s", s ? "RY" : "LY", mi->pname[a][2 * s + 1]);
-        fit(xl, sz / 2 + 10);
-        fit(yl, sz / 2 + 10);
-        gfx_text(px, py - 22, s ? "RIGHT STICK" : "LEFT STICK", stick_matrix ? C_DIM : AXCOL[2 * s], FONT_SMALL);
-        xy_pad(px, py, sz, bp[2 * s], bp[2 * s + 1], lp[2 * s], lp[2 * s + 1], col, xl, yl, 1);
+        int px = 40 + s * (sz + 120);
+        snprintf(xl, sizeof xl, "%s %s", s ? "RX" : "LX", mi->pname[a][2 * s]);
+        snprintf(yl, sizeof yl, "%s %s", s ? "RY" : "LY", mi->pname[a][2 * s + 1]);
+        fit(xl, 110);
+        fit(yl, 110);
+        xy_pad(px, y, sz, bp[2 * s], bp[2 * s + 1], lp[2 * s], lp[2 * s + 1], stick_matrix ? C_DIM : c, "", "", 1);
+        gfx_text(px + sz + 8, y + 4, s ? "RIGHT" : "LEFT", stick_matrix ? C_DIM : AXCOL[2 * s], FONT_SMALL);
+        gfx_text(px + sz + 8, y + 30, xl, C_DIM, FONT_SMALL);
+        gfx_text(px + sz + 8, y + 52, yl, C_DIM, FONT_SMALL);
     }
-    if (stick_matrix) gfx_text(rx, py + sz + 30, "MATRIX: sticks follow the STICKS page", C_WARM, FONT_SMALL);
-    gfx_text(rx, py + sz + 54, "A bypass  L2/R2 algorithm  B focus/matrix", C_DIM, FONT_SMALL);
-    gfx_text(rx, py + sz + 76, "X spring/latch  Y hold  L3/R3 freeze", C_DIM, FONT_SMALL);
-    gfx_text(rx, py + sz + 98, "SELECT tap  START save  F1/F2 presets", C_DIM, FONT_SMALL);
+    gfx_text(16, y - 24, stick_matrix ? "MATRIX: the sticks follow SETUP > STICKS" : mi->name, stick_matrix ? C_WARM : c, FONT_SMALL);
+    int hx = 2 * (sz + 120) + 40;
+    static const char *const help[] = {
+        "L1/R1 pedal  up/down control  left/right turn",
+        "A footswitch  L2/R2 algorithm  L3/R3 freeze",
+        "B focus/matrix  X spring/latch  Y hold sticks",
+        "SELECT tap  START save  F1/F2 presets",
+    };
+    for (int i = 0; i < 4; i++) gfx_text(hx, y + i * 23 - 4, help[i], C_DIM, FONT_SMALL);
 }
 
-static void draw_sticks_page(void)
+static void row_box(int x, int y, int w, int here, const char *label, const char *val, uint32_t c, const char *axn, uint32_t axc, float bar)
 {
-    int y0 = 172, vis = 15;
-    int r = row[page];
-    if (r < scroll[page]) scroll[page] = r;
-    if (r >= scroll[page] + vis) scroll[page] = r - vis + 1;
-    for (int i = scroll[page]; i < nrows(page) && i < scroll[page] + vis; i++) {
-        int y = y0 + (i - scroll[page]) * 38;
-        char lab[48], val[64];
+    gfx_fill(x, y, w, 32, here ? C_PANEL2 : C_PANEL);
+    if (here) gfx_fill(x, y, 4, 32, c);
+    gfx_text(x + 14, y + 5, label, here ? C_TEXT : C_DIM, FONT_SMALL);
+    if (axn) { gfx_fill(x + 150, y + 6, 30, 20, gfx_mix(C_PANEL, axc, 0.35f)); text_c(x + 165, y + 5, axn, axc, FONT_SMALL); }
+    if (bar >= 0.f) hslider(x + 196, y + 14, 150, bar, bar, c, c, 5);
+    char v[80];
+    snprintf(v, sizeof v, "%s", val);
+    fit(v, w - (bar >= 0.f ? 370 : 200));
+    text_r(x + w - 10, y + 5, v, here ? C_TEXT : C_DIM, FONT_SMALL);
+}
+
+static void draw_overlay(void)
+{
+    int x = 92, y = 70, w = 840, h = 620;
+    gfx_fill_a(0, 0, W, H, 0x000000, 150);
+    gfx_fill(x, y, w, h, C_BG);
+    gfx_rect(x, y, w, h, 2, C_ACC);
+    text_c(x + w / 4, y + 10, "SETUP", overlay == OV_SETUP ? C_TEXT : C_DIM, FONT_LARGE);
+    text_c(x + 3 * w / 4, y + 10, "STICKS", overlay == OV_STICKS ? C_TEXT : C_DIM, FONT_LARGE);
+    gfx_fill(overlay == OV_SETUP ? x + 40 : x + w / 2 + 40, y + 50, w / 2 - 80, 3, C_ACC);
+    gfx_text(x + 16, y + h - 30, "L1/R1 tab   up/down choose   left/right change   A do   B close", C_DIM, FONT_SMALL);
+    int ry = y + 72;
+    char lab[48], v[96];
+    if (overlay == OV_SETUP) {
+        for (int r = 0; r < NSROW; r++) {
+            switch (r) {
+            case SR_INPUT: snprintf(lab, sizeof lab, "INPUT"); snprintf(v, sizeof v, "%s", in_dev ? (*in_name ? in_name : "DEFAULT") : "NONE"); break;
+            case SR_OUTPUT: snprintf(lab, sizeof lab, "OUTPUT"); snprintf(v, sizeof v, "%s", *out_name ? out_name : "DEFAULT"); break;
+            case SR_SAVE: snprintf(lab, sizeof lab, "SAVE TO SLOT"); snprintf(v, sizeof v, "%d  (A)", preset_slot + 1); break;
+            case SR_LOAD: snprintf(lab, sizeof lab, "LOAD SLOT"); snprintf(v, sizeof v, "%d  (A)", preset_slot + 1); break;
+            case SR_FACTORY: { Patch tmp; snprintf(lab, sizeof lab, "FACTORY"); snprintf(v, sizeof v, "%d %s  (A)", factory_pick + 1, patch_factory(&tmp, factory_pick)); } break;
+            default: snprintf(lab, sizeof lab, "INIT ALL"); snprintf(v, sizeof v, "A, twice"); break;
+            }
+            row_box(x + 16, ry + r * 38, w - 32, ov_sel[OV_SETUP] == r, lab, v, C_ACC, NULL, 0, -1.f);
+        }
+        const char *lines[] = {
+            "FX SEND: plug a USB interface into the top port. Its input is",
+            "the send, its output the return. MASTER > DRY off = all wet;",
+            "each pedal's MIX goes to 100 % wet. DELAY and REVERB bypass",
+            "with trails. INPUT / OUTPUT: AUTO picks the first USB device.",
+        };
+        for (int i = 0; i < 4; i++) gfx_text(x + 24, ry + NSROW * 38 + 20 + i * 24, lines[i], C_DIM, FONT_SMALL);
+        snprintf(v, sizeof v, "TrimFX %s  %s  buffer %d  underruns %u  overruns %u", TFX_VERSION, is_pro ? "Brick Pro" : "Brick", buffer,
+                 atomic_load(&underruns), atomic_load(&overruns));
+        gfx_text(x + 24, ry + NSROW * 38 + 130, v, C_DIM, FONT_SMALL);
+        return;
+    }
+    /* STICKS: the matrix on the left, the sticks on the right */
+    int vis = 13, r = ov_sel[OV_STICKS];
+    if (r < ov_scroll[OV_STICKS]) ov_scroll[OV_STICKS] = r;
+    if (r >= ov_scroll[OV_STICKS] + vis) ov_scroll[OV_STICKS] = r - vis + 1;
+    for (int i = ov_scroll[OV_STICKS]; i < NXROW && i < ov_scroll[OV_STICKS] + vis; i++) {
         uint32_t ac = C_ACC;
         const char *axn = NULL;
         float bar = -1.f;
-        if (i == 0) snprintf(lab, sizeof lab, "MODE"), snprintf(val, sizeof val, stick_matrix ? "MATRIX" : "FOCUS (PAGE)");
-        else if (i == 1) snprintf(lab, sizeof lab, "BEHAVIOUR"), snprintf(val, sizeof val, stick_latch ? "LATCH (DRAG)" : "SPRING (OFFSET)");
-        else if (i == 2) snprintf(lab, sizeof lab, "RESET MATRIX"), snprintf(val, sizeof val, "< >");
+        if (i == 0) snprintf(lab, sizeof lab, "MODE"), snprintf(v, sizeof v, stick_matrix ? "MATRIX" : "FOCUS");
+        else if (i == 1) snprintf(lab, sizeof lab, "BEHAVIOUR"), snprintf(v, sizeof v, stick_latch ? "LATCH" : "SPRING");
+        else if (i == 2) snprintf(lab, sizeof lab, "RESET MATRIX"), snprintf(v, sizeof v, "< >");
         else {
             int q = i - 3, ax = q / 4, s = (q / 2) % 2;
             Target *t = &matrix[ax][s];
             ac = AXCOL[ax];
             axn = AXN[ax];
-            if (q & 1) {
-                snprintf(lab, sizeof lab, "  DEPTH %d", s + 1);
-                snprintf(val, sizeof val, "%+.0f %%", t->depth * 100.f);
-                bar = 0.5f + 0.5f * t->depth;
-            } else {
-                snprintf(lab, sizeof lab, "TARGET %d", s + 1);
-                target_name(*t, val, sizeof val);
-            }
+            if (q & 1) { snprintf(lab, sizeof lab, " DEPTH %d", s + 1); snprintf(v, sizeof v, "%+.0f%%", t->depth * 100.f); bar = 0.5f + 0.5f * t->depth; }
+            else { snprintf(lab, sizeof lab, "TARGET %d", s + 1); target_name(*t, v, sizeof v); }
         }
-        draw_row(y, i == r, lab, val, bar, ac, ac, axn, -1.f);
+        row_box(x + 16, ry + (i - ov_scroll[OV_STICKS]) * 38, 540, i == r, lab, v, ac, axn, ac, bar);
     }
-    /* the sticks themselves */
-    int rx = 640, sz = 160;
-    float a[NAX];
-    axes(a);
+    float av[NAX];
+    axes(av);
     for (int s = 0; s < 2; s++) {
-        int py = y0 + 10 + s * (sz + 70);
-        gfx_text(rx, py - 2, s ? "RIGHT STICK" : "LEFT STICK", C_TEXT, FONT_SMALL);
-        xy_pad(rx, py + 22, sz, 0.5f, 0.5f, 0.5f + 0.5f * a[2 * s], 0.5f + 0.5f * a[2 * s + 1], AXCOL[2 * s], AXN[2 * s], AXN[2 * s + 1], 1);
-        for (int k = 0; k < 2; k++) {
-            Target t[2];
-            int n = axis_targets(2 * s + k, t);
-            int ty = py + 26 + k * 70;
-            gfx_text(rx + sz + 14, ty, AXN[2 * s + k], AXCOL[2 * s + k], FONT_SMALL);
-            for (int j = 0; j < n; j++) {
-                char nm[48];
-                target_name(t[j], nm, sizeof nm);
-                fit(nm, 180);
-                gfx_text(rx + sz + 14, ty + 20 + j * 20, nm, C_DIM, FONT_SMALL);
-            }
-        }
+        int px = x + 600, py = ry + 24 + s * 250;
+        gfx_text(px, py - 22, s ? "RIGHT STICK" : "LEFT STICK", C_TEXT, FONT_SMALL);
+        xy_pad(px, py, 200, 0.5f, 0.5f, 0.5f + 0.5f * av[2 * s], 0.5f + 0.5f * av[2 * s + 1], AXCOL[2 * s], AXN[2 * s], AXN[2 * s + 1], 1);
     }
-    if (hold_on) gfx_text(rx, y0 + 2 * (sz + 70) + 10, "HELD (Y)", C_WARM, FONT_SMALL);
-}
-
-static void draw_setup_page(void)
-{
-    int y0 = 172;
-    for (int i = 0; i < nrows(page); i++) {
-        char lab[48], val[160];
-        setup_row_text(i, lab, val, sizeof lab < sizeof val ? 48 : 48);
-        draw_row(y0 + i * 38, i == row[page], lab, val, -1.f, C_ACC, 0, NULL, -1.f);
-    }
-    int rx = 616;
-    gfx_fill(rx, y0, 392, 300, C_PANEL);
-    gfx_text(rx + 12, y0 + 8, "FX SEND", C_ACC, FONT_LARGE);
-    const char *lines[] = {
-        "Plug a USB interface into the top port:",
-        "its input is the send, its output the",
-        "return. DRY IN RETURN off = all wet.",
-        "Each module's MIX goes to 100 % wet.",
-        "",
-        "SETUP < > on INPUT / OUTPUT picks a",
-        "device (AUTO: the first USB one).",
-        "",
-        "DELAY and REVERB bypass with trails.",
-    };
-    for (unsigned i = 0; i < sizeof lines / sizeof *lines; i++) gfx_text(rx + 12, y0 + 52 + i * 24, lines[i], C_DIM, FONT_SMALL);
-    char b[128];
-    snprintf(b, sizeof b, "underruns %u  overruns %u", atomic_load(&underruns), atomic_load(&overruns));
-    gfx_text(rx + 12, y0 + 316, b, C_DIM, FONT_SMALL);
-    snprintf(b, sizeof b, "TrimFX %s  %s  buf %d", TFX_VERSION, is_pro ? "Brick Pro" : "Brick", buffer);
-    gfx_text(rx + 12, y0 + 340, b, C_DIM, FONT_SMALL);
 }
 
 static void draw(void)
 {
     gfx_clear(C_BG);
     draw_top();
-    draw_chain();
-    if (page <= PG_VERB) draw_module_page(page);
-    else if (page == PG_STICKS) draw_sticks_page();
-    else draw_setup_page();
-    if (!in_dev) gfx_text(16, H - 26, "NO INPUT DEVICE: plug in a USB interface", C_BAD, FONT_SMALL);
+    int ord[4] = {M_TONE, 0, 0, 0};
+    eng_order(base.order, ord + 1);
+    /* the pedals in signal order, a cable between each */
+    for (int k = 0; k < 4; k++) {
+        int x = 12 + k * (PED_W + 8);
+        pedal(x, ord[k]);
+        if (k < 3) gfx_fill(x + PED_W, PED_Y + 20, 8, 4, C_DIM);
+    }
+    master_strip(12 + 4 * (PED_W + 8), W - 12 - (12 + 4 * (PED_W + 8)));
+    draw_bottom();
+    if (overlay) draw_overlay();
     if (SDL_GetTicks() < toast_until) {
         int w = gfx_text_w(toast_msg, FONT_LARGE) + 40;
-        gfx_fill_a(W / 2 - w / 2, H - 92, w, 54, 0x000000, 200);
-        gfx_rect(W / 2 - w / 2, H - 92, w, 54, 2, C_ACC);
-        text_c(W / 2, H - 83, toast_msg, C_TEXT, FONT_LARGE);
+        gfx_fill_a(W / 2 - w / 2, H / 2 - 30, w, 54, 0x000000, 210);
+        gfx_rect(W / 2 - w / 2, H / 2 - 30, w, 54, 2, C_ACC);
+        text_c(W / 2, H / 2 - 21, toast_msg, C_TEXT, FONT_LARGE);
     }
 }
 
@@ -1079,17 +1199,22 @@ static void tour(const char *path)
     patch_factory(&base, 2);
     snprintf(patch_name, sizeof patch_name, "PS RITUAL");
     sx[0] = 0.55f; sy[0] = 0.35f; sx[1] = -0.4f; sy[1] = 0.6f;
-    static const int pages[] = {PG_MOD, PG_TONE, PG_DELAY, PG_VERB, PG_STICKS, PG_SETUP};
-    for (unsigned i = 0; i < sizeof pages / sizeof *pages; i++) {
-        page = pages[i];
-        if (page <= PG_VERB) focus_mod = page;
-        row[page] = page <= PG_VERB ? 2 : 3;
+    vu_in[0] = vu_in[1] = 0.3f; vu_out[0] = 0.5f; vu_out[1] = 0.45f;
+    for (int m = 0; m < NMOD; m++) vu_mod[m] = 0.2f + 0.1f * m;
+    static const struct { int col, sel, ov; const char *tag; } S[] = {
+        {COL_MOD, R_K1, OV_NONE, "board_mod"}, {COL_VERB, R_D2, OV_NONE, "board_verb"}, {COL_MASTER, MR_TEMPO, OV_NONE, "board_master"},
+        {COL_MASTER, MR_SETUP, OV_SETUP, "setup"}, {COL_MASTER, MR_STICKS, OV_STICKS, "sticks"},
+    };
+    for (unsigned i = 0; i < sizeof S / sizeof *S; i++) {
+        set_col(S[i].col);
+        sel[col] = S[i].sel;
+        overlay = S[i].ov;
+        ov_sel[OV_STICKS] = 3;
         build_live(0.f);
-        vu_in[0] = vu_in[1] = 0.3f; vu_out[0] = 0.5f; vu_out[1] = 0.45f;
-        for (int m = 0; m < NMOD; m++) vu_mod[m] = 0.2f + 0.1f * m;
         draw();
-        shot(path, PAGE_N[page]);
+        shot(path, S[i].tag);
     }
+    overlay = OV_NONE;
     base = keep;
 }
 
@@ -1157,7 +1282,7 @@ int main(int argc, char **argv)
     int leds = env_int("TFX_LEDS", 1) ? ringleds_open("TFX", is_pro) : 0;
     perf_log("START", "TrimFX %s on %s, %s, LEDs %s", TFX_VERSION, is_pro ? "Brick Pro" : "Brick",
              bi_is_mustardos() ? "MustardOS" : "TrimUI OS", leds ? "on" : "off");
-    if (!is_pro) toast("NO STICKS HERE: USE THE STICKS PAGE / A GAMEPAD");
+    if (!is_pro) toast("NO STICKS HERE: KNOBS ONLY (OR A GAMEPAD)");
 
     audio_follow(1);
 

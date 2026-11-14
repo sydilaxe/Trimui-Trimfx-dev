@@ -3,7 +3,7 @@
 A four-module FX chain for the **TrimUI Brick Pro**, built for a **USB FX send**: plug a USB
 audio interface into the top port, send into its input, take the return from its output.
 Both analog sticks play the effects as two X/Y pads. It also runs on the Brick and Brick
-Hammer, which have no sticks, so they use the buttons and the STICKS page.
+Hammer, which have no sticks, so you play the knobs with the buttons there.
 
 ```
 USB in -> TONE -> MOD -> DELAY -> REVERB -> USB out
@@ -12,18 +12,18 @@ USB in -> TONE -> MOD -> DELAY -> REVERB -> USB out
                                      reverse...)
 ```
 
-![The MOD page: TRIPLE, with the two X/Y pads](docs/screen-mod.png)
+![The pedalboard: four pedals, the MASTER strip and the selected pedal's X/Y pads](docs/screen-board.png)
 
 **Status: 0.1.0 dev.** The engine is tested on the host (every algorithm, `make test`), and the
 app builds for MustardOS. It has **not yet run on Brick hardware.**
 
 - Every module has several **algorithms** (L2 / R2). Each algorithm has its own controls, and each
   remembers its settings.
-- Every module's **MIX** goes to **100 % wet**, with no dry at all, and **SETUP > DRY IN RETURN**
+- Every module's **MIX** goes to **100 % wet**, with no dry at all, and **MASTER > DRY**
   defaults to off. The return carries only the effect.
 - **DELAY and REVERB bypass with trails**: the input closes and the tail rings out.
 - **FREEZE**: L3 holds the delay, R3 holds the reverb, forever, with the input closed.
-- The chain order of MOD, DELAY and REVERB can be changed (SETUP > ORDER). TONE always comes
+- The chain order of MOD, DELAY and REVERB can be changed (MASTER > ORDER). TONE always comes
   first.
 
 ## The sticks: dual X/Y
@@ -35,38 +35,59 @@ Each algorithm has 8 parameters. **The first four are the PERFORM set** and sit 
 | **Left stick** | P1 (LX) | P2 (LY) |
 | **Right stick** | P3 (RX) | P4 (RY) |
 
-- **FOCUS** mode (the default) puts the sticks on the module whose page you are on. On the
-  STICKS or SETUP pages they stay on the last module page.
+- **FOCUS** mode (the default) puts the sticks on the selected pedal's four knobs. On MASTER they
+  stay on the last pedal.
 - **MATRIX** mode (B) puts each axis on up to **two parameters anywhere in the chain**, each
   with its own depth (-100 % to +100 %). For example, LX could open the resonators and darken
   the tone at once, and RY could lengthen the reverb and push its mix. Set this up on the
-  STICKS page.
+  STICKS overlay.
 - **SPRING** (the default) gives an offset while you push, and the value springs back when you
   let go. **LATCH** (X) drags the stored setting itself, which stays where you leave it.
 - **HOLD** (Y) freezes the sticks where they are, so you can let go and keep the sound.
 
-On screen, each module page has **two live X/Y pads**: a ring shows the stored setting, a dot
-shows where the sticks have taken it, and a line joins them. Every slider shows the stored
-value and the live one. The chain strip at the top has a small X/Y pair for every module, so you
-see every effect's position at once. On the Brick Pro, the stick rings light up as you push.
+On screen, the selected pedal's **two X/Y pads** sit under the board: a ring shows the stored
+setting, a dot shows where the sticks have taken it, and a line joins them. Every knob and
+slider on every pedal shows its stored value and its live one, so you see each effect's position
+at once. On the Brick Pro, the stick rings light up as you push.
 
-## Controls
+## The pedalboard
+
+Everything is on one screen, laid out as a pedalboard with the pedals in signal order:
+- **Four pedals**: TONE, MOD, DELAY and REVERB.
+- **A MASTER strip**: IN and OUT gain, DRY, TEMPO, ORDER and PRESET, plus the levels.
+
+Each pedal has:
+- an **LCD** showing the algorithm and the value of the control you are on
+- **four PERFORM knobs** (the stick-mapped ones)
+- **four DEEP sliders**
+- a **MIX fader**
+- a **footswitch** with its light: lit when on, red when bypassed, blue when frozen
+
+Every knob and slider shows its stored setting and, in the stick's colour, where the stick has
+taken it. Under the board, the selected pedal's **two X/Y pads** show the left and right stick on
+its four knobs.
+
+Devices, save / load / factory presets and the stick matrix are in two **overlays**. Open them
+from MASTER > SETUP or STICKS, or with HOME on the Brick Pro.
 
 | Button | Action |
 |---|---|
-| L1 / R1 | Page: TONE · MOD · DELAY · REVERB · STICKS · SETUP |
-| L2 / R2 | Previous / next algorithm of the module in focus |
-| D-pad ↑↓ | Select a row |
-| D-pad ←→ | Change it (hold to speed up) |
-| A | Bypass / un-bypass the module (on SETUP rows: do it) |
-| B | Sticks: FOCUS ↔ MATRIX |
+| L1 / R1 | Previous / next pedal (then MASTER). In an overlay: switch between SETUP and STICKS |
+| D-pad ↑↓ | Choose a control on the pedal: ALGORITHM, the 4 knobs, the 4 sliders, MIX |
+| D-pad ←→ | Turn it (hold to speed up). On ALGORITHM: change the algorithm |
+| A | The pedal's footswitch (bypass). On MASTER rows: open SETUP / STICKS, save to the slot |
+| B | Sticks: FOCUS ↔ MATRIX (in an overlay: close it) |
 | X | Sticks: SPRING ↔ LATCH |
 | Y | HOLD the sticks |
+| L2 / R2 | Previous / next algorithm of the selected pedal |
 | L3 / R3 | FREEZE the delay / the reverb |
 | SELECT | Tap tempo (RHYTHM, STUTTER) |
 | START | Save to the current preset slot |
 | F1 / F2 | Previous / next preset slot (an empty slot loads a factory preset) |
+| HOME | Open / close SETUP (Brick Pro) |
 | MENU | Quit (the state is saved and comes back next time) |
+
+![The STICKS overlay: the matrix and the sticks](docs/screen-sticks.png)
 
 ## The modules
 
