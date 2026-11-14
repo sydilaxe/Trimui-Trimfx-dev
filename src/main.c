@@ -310,6 +310,8 @@ static int load_patch(const char *path, Patch *p)
 static void slot_path(char *out, int n, int slot) { snprintf(out, n, "%s/presets/slot%02d.txt", app_dir, slot + 1); }
 static void state_path(char *out, int n) { snprintf(out, n, "%s/state.txt", app_dir); }
 
+static SDL_Surface *surf;
+
 /* ================================================================ the UI: one pane, a pedalboard */
 /* Four pedals side by side (TONE, MOD, DELAY, REVERB) and a MASTER strip. Each pedal: an LCD
  * (the algorithm and the control being set), four PERFORM knobs (on the sticks), four DEEP
@@ -728,7 +730,7 @@ static void keyboard(const SDL_Event *e)
 }
 
 /* ================================================================ drawing */
-#define C_BG 0x0a0b10
+#define C_BG 0x1c1d20
 #define C_PANEL 0x15171f
 #define C_PANEL2 0x1d2030
 #define C_LINE 0x2c3044
@@ -741,7 +743,7 @@ static void keyboard(const SDL_Event *e)
 #define C_BAD 0xff5a6e
 #define C_LCD 0x0c1a14
 #define C_LCDTXT 0x9df2c4
-static const uint32_t MODCOL[NMOD] = {0xffb45a, 0xc77dff, 0x5ad1ff, 0x6ee7a0};
+static const uint32_t MODCOL[NMOD] = {0xe8961e, 0x6a4fd0, 0x2fb04a, 0x1f78d6}; /* the name bands */
 static const uint32_t AXCOL[NAX] = {0xff7ab6, 0xffd15a, 0x5ad1ff, 0x8affc1};
 static const char *const AXN[NAX] = {"LX", "LY", "RX", "RY"};
 
@@ -753,14 +755,6 @@ static void fit(char *s, int w)
 {
     int max = w / 9;
     if ((int)strlen(s) > max && max > 2) s[max - 1] = '.', s[max] = 0;
-}
-
-static void meter_v(int x, int y, int w, int h, float lin, uint32_t c)
-{
-    gfx_fill(x, y, w, h, 0x0e1119);
-    float db = lin2db(lin + 1e-9f), t = clampf((db + 48.f) / 48.f, 0.f, 1.f);
-    int fh = (int)(t * h);
-    gfx_fill(x, y + h - fh, w, fh, db > -1.f ? C_BAD : db > -9.f ? C_WARM : c);
 }
 
 /* an X/Y pad: the stored setting as a ring, where the sticks have it as a dot, a line between */
@@ -786,8 +780,23 @@ static void xy_pad(int x, int y, int sz, float bx, float by, float lx, float ly,
 }
 
 /* ---------------------------------------------------------------- knobs and sliders */
+/* ---------------------------------------------------------------- the board's look: raw-aluminium
+ * boxes with hand-stamped lettering, black knurled knobs with a pointer nub, chrome footswitches,
+ * a Dymo-tape readout, and two joystick gimbals on the master box for the sticks. */
+#define ALU 0xc4c6c7         /* sandblasted aluminium */
+#define INK 0x26272a         /* stamped letters */
+#define INK_LIGHT 0xe9eaeb   /* the stamp's lit edge */
+#define ACCENT 0xff9a1f      /* what is selected */
+#define BOARD 0x15171d
 #define KNOB_A0 (0.75f * TFX_PI)   /* 7:30 */
 #define KNOB_SPAN (1.5f * TFX_PI)  /* to 4:30 */
+
+#define PED_W 200
+#define PED_Y 34
+#define PED_H 728
+#define PED_X(k) (8 + (k) * (PED_W + 6))
+#define MST_X PED_X(4)
+#define MST_W (W - 6 - MST_X)
 
 static void knob_pt(float cx, float cy, float r, float v, float *x, float *y)
 {
@@ -796,28 +805,150 @@ static void knob_pt(float cx, float cy, float r, float v, float *x, float *y)
     *y = cy + r * sinf(a);
 }
 
-static void knob(int cx, int cy, int r, float stored, float lv, uint32_t col_, uint32_t axc, int used, int selected)
+static uint32_t hash32(uint32_t x)
 {
-    /* the track, the stored value's arc, the live value's marker */
-    for (int i = 0; i <= 40; i++) {
-        float v = i / 40.f, x, y;
-        knob_pt(cx, cy, r + 7, v, &x, &y);
-        gfx_disc(x, y, 2.2f, used && v <= stored + 0.001f ? col_ : C_LINE);
+    x ^= x >> 16; x *= 0x7feb352d; x ^= x >> 15; x *= 0x846ca68b; x ^= x >> 16;
+    return x;
+}
+
+/* the board and the five boxes, made once: speckled metal, rounded corners, lit top edges */
+static uint32_t *bg;
+static void make_bg(void)
+{
+    bg = malloc(sizeof(uint32_t) * W * H);
+    if (!bg) return;
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            uint32_t h = hash32((uint32_t)(y * W + x) * 2654435761u);
+            int v = 0x15 + (int)(h & 3);
+            bg[y * W + x] = (uint32_t)(v << 16 | v << 8 | (v + 6));
+        }
+    for (int k = 0; k < 5; k++) {
+        int x0 = PED_X(k), w = k < 4 ? PED_W : MST_W, y0 = PED_Y, h = PED_H, rr = 12;
+        for (int y = y0; y < y0 + h; y++)
+            for (int x = x0; x < x0 + w; x++) {
+                /* the rounded corners */
+                int dx = x < x0 + rr ? x0 + rr - x : x >= x0 + w - rr ? x - (x0 + w - rr - 1) : 0;
+                int dy = y < y0 + rr ? y0 + rr - y : y >= y0 + h - rr ? y - (y0 + h - rr - 1) : 0;
+                if (dx * dx + dy * dy > rr * rr) continue;
+                uint32_t hsh = hash32((uint32_t)(y * 7919 + x * 104729 + k));
+                int v = 0xbe + (int)(hsh % 22) - 11;          /* the blast's speckle */
+                if ((hsh >> 8) % 97 == 0) v -= 38;              /* a pit here and there */
+                v += (int)(10.f * (1.f - (float)(y - y0) / h)); /* a little lighter at the top */
+                int edge = x - x0 < 2 || y - y0 < 2 ? 22 : (x0 + w - x <= 3 || y0 + h - y <= 3) ? -45 : 0;
+                v = v + edge;
+                v = v < 0 ? 0 : v > 255 ? 255 : v;
+                bg[y * W + x] = (uint32_t)(v << 16 | v << 8 | (v + 2 > 255 ? 255 : v + 2));
+            }
+        /* its shadow on the board */
+        for (int y = y0 + h; y < y0 + h + 4 && y < H; y++)
+            for (int x = x0 + 4; x < x0 + w + 2 && x < W; x++) bg[y * W + x] = 0x0a0b0e;
     }
-    gfx_disc(cx, cy, r, used ? 0x2a2e40 : 0x1a1c26);
-    gfx_ring(cx, cy, r, 2.f, used ? 0x3a3f56 : C_LINE);
-    gfx_disc(cx, cy, r - 7, used ? 0x20232f : 0x17181f);
+}
+
+/* hand-stamped letters: each one a little off line, pressed in (dark, with a lit lower edge) */
+static int stamp(int x, int y, const char *s, int big, int spacing)
+{
+    int font = big ? FONT_LARGE : FONT_SMALL, cw = (big ? 16 : 9) + spacing;
+    char ch[2] = {0, 0};
+    uint32_t seed = 0;
+    for (const char *p = s; *p; p++) seed = seed * 31 + (uint8_t)*p;
+    for (int i = 0; s[i]; i++) {
+        if (s[i] == ' ') continue;
+        uint32_t h = hash32(seed + (uint32_t)i * 977u);
+        int dy = (int)(h % 4) - 1, dx = (int)((h >> 4) % 3) - 1;
+        ch[0] = s[i];
+        gfx_text(x + i * cw + dx + 1, y + dy + 1, ch, INK_LIGHT, font);
+        gfx_text(x + i * cw + dx, y + dy, ch, (h >> 9) % 5 ? INK : 0x45474b, font);
+    }
+    return (int)strlen(s) * cw;
+}
+static int stamp_w(const char *s, int big, int spacing) { return (int)strlen(s) * ((big ? 16 : 9) + spacing); }
+static void stamp_c(int cx, int y, const char *s, int big, int spacing) { stamp(cx - stamp_w(s, big, spacing) / 2, y, s, big, spacing); }
+
+/* a black knurled knob with a pointer nub; the stored value as a small punched dot on the metal,
+ * the stick's colour beside the nub while a stick moves it */
+static void knob(int cx, int cy, int r, float stored, float lv, uint32_t axc, int used, int selected)
+{
+    if (selected) gfx_ring(cx, cy, r + 15, 2.5f, ACCENT);
+    if (used) {
+        float dx_, dy_;
+        knob_pt(cx, cy, r + 10, stored, &dx_, &dy_);
+        gfx_disc(dx_ + 1, dy_ + 1, 2.2f, INK_LIGHT);
+        gfx_disc(dx_, dy_, 2.2f, INK);
+    }
+    gfx_disc(cx + 2, cy + 3, r + 1, 0x7d7f82); /* its shadow on the metal */
+    /* the pointer nub */
+    float a = KNOB_A0 + KNOB_SPAN * (used ? lv : 0.5f);
+    float tip[6] = {cx + (r + 9) * cosf(a), cy + (r + 9) * sinf(a), cx + r * cosf(a - 0.3f), cy + r * sinf(a - 0.3f),
+                    cx + r * cosf(a + 0.3f), cy + r * sinf(a + 0.3f)};
+    gfx_tri(tip[0], tip[1], tip[2], tip[3], tip[4], tip[5], 0x1b1c1f);
+    gfx_disc(cx, cy, r, 0x1b1c1f);
+    for (int i = 0; i < 48; i++) { /* the knurling */
+        float t = i * TFX_2PI / 48.f;
+        gfx_disc(cx + (r - 1.5f) * cosf(t), cy + (r - 1.5f) * sinf(t), 1.f, 0x3c3e43);
+    }
+    gfx_disc(cx, cy, r - 4, 0x26272b);
+    gfx_disc(cx - r * 0.25f, cy - r * 0.3f, r * 0.45f, 0x2c2d32); /* the cap's sheen */
+    gfx_disc(cx, cy, r - 7, 0x232428);
     if (!used) return;
-    float px, py, qx, qy;
-    knob_pt(cx, cy, r - 4, lv, &px, &py);
-    knob_pt(cx, cy, r * 0.25f, lv, &qx, &qy);
-    gfx_line(qx, qy, px, py, 3.f, C_TEXT);
-    if (fabsf(lv - stored) > 0.004f) {
-        float mx, my;
-        knob_pt(cx, cy, r + 7, lv, &mx, &my);
-        gfx_disc(mx, my, 5.f, axc);
-    }
-    if (selected) gfx_ring(cx, cy, r + 13, 2.f, C_TEXT);
+    float px = cx + (r - 3) * cosf(a), py = cy + (r - 3) * sinf(a);
+    gfx_line(cx + r * 0.35f * cosf(a), cy + r * 0.35f * sinf(a), px, py, r > 20 ? 3.f : 2.f, 0xf4f4f4);
+    if (fabsf(lv - stored) > 0.004f) gfx_disc(cx + (r + 13) * cosf(a), cy + (r + 13) * sinf(a), 3.5f, axc);
+}
+
+/* the LED in its black bezel */
+static void led(int cx, int cy, uint32_t c, int lit)
+{
+    gfx_disc(cx, cy, 11.f, 0x101114);
+    gfx_ring(cx, cy, 11.f, 2.f, 0x3a3c40);
+    gfx_disc(cx, cy, 6.f, lit ? c : gfx_mix(0x101114, c, 0.18f));
+    if (lit) { gfx_ring(cx, cy, 8.f, 2.f, gfx_mix(0x101114, c, 0.55f)); gfx_disc(cx - 2, cy - 2, 2.f, 0xffffff); }
+}
+
+/* a chrome footswitch on its nut */
+static void footswitch(int cx, int cy, int pressed)
+{
+    float hx[12];
+    for (int i = 0; i < 6; i++) hx[2 * i] = cx + 26 * cosf(i * TFX_PI / 3), hx[2 * i + 1] = cy + 26 * sinf(i * TFX_PI / 3);
+    gfx_poly(hx, 6, 0xb9bbbe);
+    gfx_disc(cx, cy, 21.f, 0x8e9094);
+    gfx_disc(cx, cy, 17.f, pressed ? 0xc7c9cc : 0xe2e4e6);
+    gfx_disc(cx - 5, cy - 6, 7.f, 0xf8f9fa);
+    gfx_ring(cx, cy, 17.f, 1.5f, 0x6f7175);
+}
+
+/* a strip of Dymo tape: raised white capitals on black */
+static void dymo(int cx, int y, const char *s, uint32_t tape)
+{
+    char b[48];
+    snprintf(b, sizeof b, "%s", s);
+    fit(b, PED_W - 30);
+    int w = gfx_text_w(b, FONT_SMALL) + 20;
+    gfx_fill(cx - w / 2 + 2, y + 2, w, 26, 0x55575b);
+    gfx_fill(cx - w / 2, y, w, 26, tape);
+    gfx_fill(cx - w / 2, y + 3, w, 1, gfx_mix(tape, 0xffffff, 0.12f));
+    text_c(cx, y + 2, b, 0xf2f2f2, FONT_SMALL);
+}
+
+/* a Janus-style joystick: the gimbal plate, the boot, the stick leaning where it is pushed */
+static void joystick(int cx, int cy, int sz, float jx, float jy, uint32_t c)
+{
+    int h = sz / 2;
+    gfx_fill(cx - h + 3, cy - h + 3, sz, sz, 0x6f7174);
+    gfx_fill(cx - h, cy - h, sz, sz, 0x141518);
+    for (int i = 0; i < 4; i++) /* its screws */
+        gfx_disc(cx + (i & 1 ? h - 9 : -h + 9), cy + (i & 2 ? h - 9 : -h + 9), 3.f, 0x3a3c40);
+    gfx_disc(cx, cy, h - 8, 0x0a0a0c);
+    gfx_ring(cx, cy, h - 8, 3.f, 0x2b2d31);
+    gfx_disc(cx, cy, h - 18, 0x1d1e22); /* the rubber boot */
+    gfx_ring(cx, cy, h * 0.45f, 1.5f, 0x26272b);
+    float tx = cx + jx * (h - 22), ty = cy - jy * (h - 22);
+    gfx_line(cx, cy, tx, ty, 9.f, 0x2e3035);
+    gfx_disc(tx + 2, ty + 3, 12.f, 0x050506);
+    gfx_disc(tx, ty, 12.f, 0x2a2b30);
+    gfx_disc(tx - 3, ty - 4, 5.f, 0x4a4c52);
+    gfx_ring(tx, ty, 12.f, 2.f, c);
 }
 
 static void hslider(int x, int y, int w, float stored, float lv, uint32_t col_, uint32_t axc, int thick)
@@ -828,11 +959,11 @@ static void hslider(int x, int y, int w, float stored, float lv, uint32_t col_, 
     if (fabsf(lv - stored) > 0.004f) gfx_fill(x + (int)(w * lv) - 2, y - 5, 4, thick + 10, axc);
 }
 
-/* which stick axis moves parameter k of module m now (NULL: none) */
+/* which stick axis moves parameter k of module m now (NULL: none; k -1: MIX) */
 static const char *axis_of(int m, int k, uint32_t *c)
 {
     if (!stick_matrix) {
-        if (m == focus_mod && k < 4) { *c = AXCOL[k]; return AXN[k]; }
+        if (m == focus_mod && k >= 0 && k < 4) { *c = AXCOL[k]; return AXN[k]; }
         return NULL;
     }
     for (int ax = 0; ax < NAX; ax++)
@@ -841,190 +972,165 @@ static const char *axis_of(int m, int k, uint32_t *c)
     return NULL;
 }
 
-#define PED_W 200
-#define PED_Y 54
-#define PED_H 560
+/* a short stamped label: up to n letters */
+static void short_name(const char *s, char *o, int n)
+{
+    int i = 0;
+    for (; s[i] && i < n; i++) o[i] = s[i];
+    o[i] = 0;
+}
 
 static void pedal(int x, int m)
 {
+    static const char *const CODE[NMOD] = {"TF0101", "TF0401", "TF0501", "TF0901"};
     const ModInfo *mi = eng_info(m);
     const ModState *ms = &base.m[m];
     int a = ms->algo, on = !ms->bypass, focused = col == m && !overlay, s = sel[m];
-    uint32_t c = MODCOL[m], body = gfx_mix(C_PANEL, c, focused ? 0.10f : 0.05f);
     int y = PED_Y;
-    gfx_fill(x, y, PED_W, PED_H, body);
-    gfx_rect(x, y, PED_W, PED_H, focused ? 3 : 1, focused ? c : C_LINE);
-    /* screws, for the look of a box */
-    gfx_disc(x + 9, y + 9, 3.f, C_LINE); gfx_disc(x + PED_W - 9, y + 9, 3.f, C_LINE);
-    gfx_disc(x + 9, y + PED_H - 9, 3.f, C_LINE); gfx_disc(x + PED_W - 9, y + PED_H - 9, 3.f, C_LINE);
-    text_c(x + PED_W / 2, y + 6, mi->name, on ? c : C_DIM, FONT_SMALL);
-
-    /* the LCD: the algorithm, and what is being set */
-    int ly = y + 30;
-    gfx_fill(x + 10, ly, PED_W - 20, 54, C_LCD);
-    gfx_rect(x + 10, ly, PED_W - 20, 54, 1, focused && s == R_ALGO ? C_TEXT : 0x1c3328);
+    if (focused) gfx_rect(x - 3, y - 3, PED_W + 6, PED_H + 6, 2, ACCENT);
     char b[64], v[48];
+
+    /* the maker and the box's name, stamped across the top */
+    stamp(x + 14, y + 10, "TRIMFX", 0, 2);
+    snprintf(b, sizeof b, "%s", mi->name);
+    stamp(x + PED_W - 14 - stamp_w(b, 0, 2), y + 10, b, 0, 2);
+
+    /* the four big knobs (the sticks' four) */
+    for (int k = 0; k < 4; k++) {
+        int cx = x + PED_W / 4 + (k & 1) * PED_W / 2 + 1, cy = y + 92 + (k >> 1) * 128;
+        int used = param_used(m, k);
+        uint32_t axc = ACCENT;
+        const char *ax = axis_of(m, k, &axc);
+        knob(cx, cy, 27, ms->p[a][k], live.m[m].p[a][k], axc, used, focused && s == R_K1 + k);
+        snprintf(b, sizeof b, "%s", used ? mi->pname[a][k] : "");
+        fit(b, PED_W / 2 - 4);
+        stamp_c(cx, cy + 40, b, 0, 1);
+        if (ax) { /* which stick: a small painted dot and its letters */
+            gfx_disc(cx - 36, cy - 30, 5.f, axc);
+            stamp(cx - 30, cy - 41, ax, 0, 0);
+        }
+    }
+
+    /* the four small knobs */
+    for (int k = 4; k < 8; k++) {
+        int cx = x + 28 + (k - 4) * 48, cy = y + 334, used = param_used(m, k);
+        uint32_t axc = ACCENT;
+        axis_of(m, k, &axc);
+        knob(cx, cy, 15, ms->p[a][k], live.m[m].p[a][k], axc, used, focused && s == R_K1 + k);
+        short_name(used ? mi->pname[a][k] : "", b, 6);
+        stamp_c(cx, cy + ((k & 1) ? 44 : 23), b, 0, 0); /* staggered, so neighbours never touch */
+    }
+
+    /* the algorithm: a big selector knob, its name stamped under it */
+    int acx = x + 58, acy = y + 462;
+    float apos = mi->nalgo > 1 ? (float)a / (mi->nalgo - 1) : 0.f;
+    for (int i = 0; i < mi->nalgo; i++) { /* a punched dot for each position */
+        float px, py;
+        knob_pt(acx, acy, 46, mi->nalgo > 1 ? (float)i / (mi->nalgo - 1) : 0.f, &px, &py);
+        gfx_disc(px + 1, py + 1, 2.f, INK_LIGHT);
+        gfx_disc(px, py, 2.f, i == a ? ACCENT : INK);
+    }
+    knob(acx, acy, 34, apos, apos, ACCENT, 1, focused && s == R_ALGO);
+    snprintf(v, sizeof v, "%d", a + 1);
+    stamp_c(acx, acy + 50, v, 0, 0);
+
+    /* MIX */
+    uint32_t axc = ACCENT;
+    axis_of(m, -1, &axc);
+    knob(x + 150, acy - 8, 24, ms->mix, live.m[m].mix, axc, 1, focused && s == R_MIX);
+    stamp_c(x + 150, acy + 26, "MIX", 0, 2);
+
+    /* the name of the algorithm, then the Dymo readout */
     snprintf(b, sizeof b, "%s", mi->algo[a]);
-    fit(b, PED_W - 60);
-    gfx_text(x + 16, ly + 4, b, C_LCDTXT, FONT_SMALL);
-    snprintf(v, sizeof v, "%d/%d", a + 1, mi->nalgo);
-    text_r(x + PED_W - 16, ly + 4, v, 0x4f8a6a, FONT_SMALL);
+    stamp_c(x + PED_W / 2, y + 538, b, 0, 2);
     if (focused && s >= R_K1 && s <= R_D4 && param_used(m, s - R_K1)) {
         int k = s - R_K1;
         mi->fmt(a, k, live.m[m].p[a][k], &live, v, sizeof v);
         snprintf(b, sizeof b, "%s %s", mi->pname[a][k], v);
     } else if (focused && s == R_MIX)
-        snprintf(b, sizeof b, "MIX %.0f%%", live.m[m].mix * 100.f);
+        snprintf(b, sizeof b, ms->mix >= 0.999f ? "MIX ALL WET" : "MIX %.0f%%", live.m[m].mix * 100.f);
+    else if (focused && s == R_ALGO)
+        snprintf(b, sizeof b, "%d/%d %s", a + 1, mi->nalgo, mi->algo[a]);
     else
         snprintf(b, sizeof b, "%s", mi->blurb[a]);
-    fit(b, PED_W - 30);
-    gfx_text(x + 16, ly + 28, b, focused ? C_LCDTXT : 0x5f9c7c, FONT_SMALL);
+    dymo(x + PED_W / 2, y + 566, b, focused ? 0x14161a : 0x2a2c31);
 
-    /* four PERFORM knobs */
-    for (int k = 0; k < 4; k++) {
-        int cx = x + PED_W / 4 + (k & 1) * PED_W / 2, cy = y + 124 + (k >> 1) * 114;
-        int used = param_used(m, k);
-        uint32_t axc = c;
-        const char *ax = axis_of(m, k, &axc);
-        knob(cx, cy, 26, ms->p[a][k], live.m[m].p[a][k], on ? c : C_DIM, axc, used, focused && s == R_K1 + k);
-        snprintf(b, sizeof b, "%s", used ? mi->pname[a][k] : "-");
-        fit(b, ax ? PED_W / 2 - 30 : PED_W / 2 - 4);
-        int tw = gfx_text_w(b, FONT_SMALL) + (ax ? 26 : 0), tx = cx - tw / 2;
-        if (ax) { /* the stick axis that moves it, as a tag before its name */
-            gfx_fill(tx - 2, cy + 36, 24, 19, gfx_mix(body, axc, 0.45f));
-            gfx_text(tx + 1, cy + 34, ax, axc, FONT_SMALL);
-            tx += 26;
-        }
-        gfx_text(tx, cy + 34, b, focused && s == R_K1 + k ? C_TEXT : C_DIM, FONT_SMALL);
-        if (used) {
-            mi->fmt(a, k, live.m[m].p[a][k], &live, v, sizeof v);
-            fit(v, PED_W / 2 - 4);
-            text_c(cx, cy + 52, v, on ? gfx_mix(C_DIM, c, 0.6f) : C_LINE, FONT_SMALL);
-        }
-    }
-
-    /* four DEEP sliders */
-    for (int k = 4; k < 8; k++) {
-        int sy_ = y + 318 + (k - 4) * 35, used = param_used(m, k), here = focused && s == R_K1 + k;
-        if (here) gfx_fill(x + 6, sy_ - 2, PED_W - 12, 34, C_PANEL2);
-        snprintf(b, sizeof b, "%s", used ? mi->pname[a][k] : "-");
-        fit(b, 96);
-        gfx_text(x + 14, sy_, b, here ? C_TEXT : C_DIM, FONT_SMALL);
-        if (!used) continue;
-        mi->fmt(a, k, live.m[m].p[a][k], &live, v, sizeof v);
-        fit(v, 86);
-        text_r(x + PED_W - 12, sy_, v, here ? C_TEXT : C_DIM, FONT_SMALL);
-        uint32_t axc = c;
-        axis_of(m, k, &axc);
-        hslider(x + 14, sy_ + 23, PED_W - 28, ms->p[a][k], live.m[m].p[a][k], on ? c : C_DIM, axc, 4);
-    }
-
-    /* the MIX fader */
-    int my = y + 466 + 2;
-    if (focused && s == R_MIX) gfx_fill(x + 6, my - 4, PED_W - 12, 38, C_PANEL2);
-    gfx_text(x + 14, my - 2, "MIX", focused && s == R_MIX ? C_TEXT : C_DIM, FONT_SMALL);
-    snprintf(v, sizeof v, ms->mix >= 0.999f ? "WET" : "%.0f%%", live.m[m].mix * 100.f);
-    uint32_t axc = c;
-    axis_of(m, -1, &axc);
-    hslider(x + 56, my + 6, PED_W - 120, ms->mix, live.m[m].mix, on ? c : C_DIM, axc, 8);
-    text_r(x + PED_W - 12, my - 2, v, focused && s == R_MIX ? C_TEXT : C_DIM, FONT_SMALL);
-
-    /* the footswitch and its light */
-    int fy = y + 526;
+    /* the LED, the footswitch, the serial */
     int frozen = (m == M_DELAY && base.freeze_dly) || (m == M_VERB && base.freeze_verb);
-    gfx_disc(x + PED_W / 2, fy, 19.f, 0x30344a);
-    gfx_ring(x + PED_W / 2, fy, 19.f, 3.f, 0x8a90a8);
-    gfx_disc(x + PED_W / 2, fy, 12.f, 0x4a4f66);
-    uint32_t led = frozen ? C_COOL : on ? c : 0x3a1a20;
-    gfx_disc(x + 26, fy, 8.f, led);
-    if (on) gfx_ring(x + 26, fy, 12.f, 2.f, gfx_mix(body, led, 0.5f));
-    gfx_text(x + PED_W - 74, fy - 11, frozen ? "FREEZE" : on ? "ON" : "BYPASS", frozen ? C_COOL : on ? c : C_BAD, FONT_SMALL);
-    /* its level */
+    led(x + 146, y + 622, frozen ? 0x4fb8ff : 0xff2b1a, on || frozen);
+    footswitch(x + 146, y + 676, !on);
+    stamp(x + 18, y + 668, CODE[m], 0, 2);
+    if (frozen) stamp(x + 18, y + 620, "FROZEN", 0, 1);
+    else if (!on) stamp(x + 18, y + 620, "BYPASS", 0, 1);
+    /* the level, a thin bar under the readout */
     float t = clampf((lin2db(vu_mod[m] + 1e-9f) + 48.f) / 48.f, 0.f, 1.f);
-    gfx_fill(x + 14, y + PED_H - 9, PED_W - 28, 3, 0x0e1119);
-    gfx_fill(x + 14, y + PED_H - 9, (int)((PED_W - 28) * t), 3, on ? c : C_LINE);
+    gfx_fill(x + 30, y + 598, PED_W - 60, 3, 0x7a7c80);
+    gfx_fill(x + 30, y + 598, (int)((PED_W - 60) * t), 3, on ? 0x2f3135 : 0x8a8c90);
 }
 
 static void master_strip(int x, int w)
 {
     int focused = col == COL_MASTER && !overlay, y = PED_Y;
-    gfx_fill(x, y, w, PED_H, C_PANEL);
-    gfx_rect(x, y, w, PED_H, focused ? 3 : 1, focused ? C_ACC : C_LINE);
-    text_c(x + w / 2, y + 6, "MASTER", focused ? C_ACC : C_DIM, FONT_SMALL);
+    if (focused) gfx_rect(x - 3, y - 3, w + 6, PED_H + 6, 2, ACCENT);
+    stamp_c(x + w / 2, y + 10, "TRIMFX", 1, 2);
+    stamp_c(x + w / 2, y + 52, "IN  FX  OUT", 0, 0);
+    int ry0 = y + 86;
     for (int r = 0; r < NMROW; r++) {
-        int ry = y + 34 + r * 54, here = focused && sel[COL_MASTER] == r;
-        if (here) gfx_fill(x + 4, ry - 2, w - 8, 50, C_PANEL2);
+        int ry = ry0 + r * 29, here = focused && sel[COL_MASTER] == r;
         char lab[24], v[48];
-        float bar = -1.f;
         switch (r) {
-        case MR_IN: snprintf(lab, sizeof lab, "IN"); snprintf(v, sizeof v, "%+.1f dB", base.in_db); bar = (base.in_db + 24.f) / 48.f; break;
-        case MR_OUT: snprintf(lab, sizeof lab, "OUT"); snprintf(v, sizeof v, "%+.1f dB", base.out_db); bar = (base.out_db + 24.f) / 48.f; break;
-        case MR_DRY: snprintf(lab, sizeof lab, "DRY"); snprintf(v, sizeof v, base.dry < 0.005f ? "OFF" : "%.0f%%", base.dry * 100.f); bar = base.dry; break;
-        case MR_TEMPO: snprintf(lab, sizeof lab, "TEMPO"); snprintf(v, sizeof v, "%.0f", base.bpm); bar = (base.bpm - 40.f) / 200.f; break;
-        case MR_ORDER: snprintf(lab, sizeof lab, "ORDER"); snprintf(v, sizeof v, "%s", eng_order_name(base.order)); break;
+        case MR_IN: snprintf(lab, sizeof lab, "IN"); snprintf(v, sizeof v, "%+.1f", base.in_db); break;
+        case MR_OUT: snprintf(lab, sizeof lab, "OUT"); snprintf(v, sizeof v, "%+.1f", base.out_db); break;
+        case MR_DRY: snprintf(lab, sizeof lab, "DRY"); snprintf(v, sizeof v, base.dry < 0.005f ? "OFF" : "%.0f%%", base.dry * 100.f); break;
+        case MR_TEMPO: snprintf(lab, sizeof lab, "BPM"); snprintf(v, sizeof v, "%.0f", base.bpm); break;
+        case MR_ORDER: snprintf(lab, sizeof lab, "ORDER"); snprintf(v, sizeof v, "%d", base.order + 1); break;
         case MR_SLOT: snprintf(lab, sizeof lab, "PRESET"); snprintf(v, sizeof v, "%d", preset_slot + 1); break;
-        case MR_SETUP: snprintf(lab, sizeof lab, "SETUP"); snprintf(v, sizeof v, "A >"); break;
-        default: snprintf(lab, sizeof lab, "STICKS"); snprintf(v, sizeof v, "A >"); break;
+        case MR_SETUP: snprintf(lab, sizeof lab, "SETUP"); snprintf(v, sizeof v, ">"); break;
+        default: snprintf(lab, sizeof lab, "STICKS"); snprintf(v, sizeof v, ">"); break;
         }
-        gfx_text(x + 10, ry, lab, here ? C_TEXT : C_DIM, FONT_SMALL);
-        if (r == MR_ORDER) { fit(v, w - 16); gfx_text(x + 10, ry + 22, v, here ? C_TEXT : C_DIM, FONT_SMALL); }
-        else text_r(x + w - 8, ry, v, here ? C_TEXT : C_DIM, FONT_SMALL);
-        if (bar >= 0.f) hslider(x + 10, ry + 30, w - 20, bar, bar, C_ACC, C_ACC, 4);
-        if (r == MR_SLOT) { char nm[48]; snprintf(nm, sizeof nm, "%s", patch_name); fit(nm, w - 16); gfx_text(x + 10, ry + 22, nm, C_DIM, FONT_SMALL); }
+        if (here) gfx_rect(x + 6, ry - 3, w - 12, 27, 2, ACCENT);
+        stamp(x + 12, ry, lab, 0, 1);
+        stamp(x + w - 12 - stamp_w(v, 0, 1), ry, v, 0, 1);
     }
-    /* the levels */
-    int my = y + 34 + NMROW * 54 + 4, mh = PED_H - (my - y) - 14;
-    meter_v(x + 14, my, 12, mh, vu_in[0], C_COOL);
-    meter_v(x + 30, my, 12, mh, vu_in[1], C_COOL);
-    meter_v(x + w - 42, my, 12, mh, vu_out[0], C_GOOD);
-    meter_v(x + w - 26, my, 12, mh, vu_out[1], C_GOOD);
-    text_c(x + w / 2, my + mh / 2 - 22, "IN", C_DIM, FONT_SMALL);
-    text_c(x + w / 2, my + mh / 2 + 2, "OUT", C_DIM, FONT_SMALL);
+    /* the preset's name on tape, and the chain's order */
+    int ny = ry0 + NMROW * 29 + 6;
+    char nm[48];
+    snprintf(nm, sizeof nm, "%s", eng_order_name(base.order));
+    stamp_c(x + w / 2, ny, nm, 0, 0);
+    snprintf(nm, sizeof nm, "%s", patch_name);
+    fit(nm, w - 30);
+    int tw = gfx_text_w(nm, FONT_SMALL) + 16;
+    gfx_fill(x + w / 2 - tw / 2, ny + 26, tw, 24, 0x14161a);
+    text_c(x + w / 2, ny + 27, nm, 0xf2f2f2, FONT_SMALL);
+    /* the two joysticks: where the sticks are, and what they move */
+    float av[NAX];
+    axes(av);
+    int m = focus_mod, a = base.m[m].algo, sz = w - 62;
+    for (int s = 0; s < 2; s++) {
+        int cy = ny + 66 + sz / 2 + s * (sz + 42);
+        joystick(x + w / 2, cy, sz, av[2 * s], av[2 * s + 1], stick_matrix ? 0x8a8c90 : AXCOL[2 * s]);
+        char lab[40];
+        if (stick_matrix) snprintf(lab, sizeof lab, "%s MATRIX", s ? "R" : "L");
+        else snprintf(lab, sizeof lab, "%.5s/%.5s", eng_info(m)->pname[a][2 * s], eng_info(m)->pname[a][2 * s + 1]);
+        stamp_c(x + w / 2, cy + sz / 2 + 8, lab, 0, 0);
+    }
+    /* the levels: a light each side of the maker's name, in and out */
+    float li = fmaxf(vu_in[0], vu_in[1]), lo = fmaxf(vu_out[0], vu_out[1]);
+    led(x + 18, y + 62, li > 0.9f ? 0xff2b1a : 0x43e05a, li > 0.01f);
+    led(x + w - 18, y + 62, lo > 0.9f ? 0xff2b1a : 0x43e05a, lo > 0.01f);
 }
 
 static void draw_top(void)
 {
-    gfx_fill(0, 0, W, 46, C_PANEL);
-    gfx_text(14, 5, "TRIMFX", C_ACC, FONT_LARGE);
     char b[96];
     snprintf(b, sizeof b, "%d  %s", preset_slot + 1, patch_name);
-    fit(b, 300);
-    gfx_text(130, 12, b, C_TEXT, FONT_SMALL);
+    fit(b, 330);
+    gfx_text(14, 5, b, 0xe8e8e8, FONT_SMALL);
     snprintf(b, sizeof b, "%.0f BPM", base.bpm);
-    gfx_text(450, 12, b, C_DIM, FONT_SMALL);
+    gfx_text(370, 5, b, 0x9a9ca2, FONT_SMALL);
+    if (!in_dev) gfx_text(480, 5, "NO INPUT", C_BAD, FONT_SMALL);
     snprintf(b, sizeof b, "STICKS %s %s%s", stick_matrix ? "MATRIX" : "FOCUS", stick_latch ? "LATCH" : "SPRING", hold_on ? " HELD" : "");
-    text_r(W - 16, 12, b, hold_on ? C_WARM : C_DIM, FONT_SMALL);
-    if (!in_dev) gfx_text(560, 12, "NO INPUT", C_BAD, FONT_SMALL);
-}
-
-/* below the board: the selected pedal's two X/Y pads, and what the buttons do */
-static void draw_bottom(void)
-{
-    int y = PED_Y + PED_H + 30, m = focus_mod, a = base.m[m].algo, sz = H - y - 6;
-    const ModInfo *mi = eng_info(m);
-    const float *bp = base.m[m].p[a], *lp = live.m[m].p[a];
-    uint32_t c = MODCOL[m];
-    char xl[40], yl[40];
-    for (int s = 0; s < 2; s++) {
-        int px = 40 + s * (sz + 120);
-        snprintf(xl, sizeof xl, "%s %s", s ? "RX" : "LX", mi->pname[a][2 * s]);
-        snprintf(yl, sizeof yl, "%s %s", s ? "RY" : "LY", mi->pname[a][2 * s + 1]);
-        fit(xl, 110);
-        fit(yl, 110);
-        xy_pad(px, y, sz, bp[2 * s], bp[2 * s + 1], lp[2 * s], lp[2 * s + 1], stick_matrix ? C_DIM : c, "", "", 1);
-        gfx_text(px + sz + 8, y + 4, s ? "RIGHT" : "LEFT", stick_matrix ? C_DIM : AXCOL[2 * s], FONT_SMALL);
-        gfx_text(px + sz + 8, y + 30, xl, C_DIM, FONT_SMALL);
-        gfx_text(px + sz + 8, y + 52, yl, C_DIM, FONT_SMALL);
-    }
-    gfx_text(16, y - 24, stick_matrix ? "MATRIX: the sticks follow SETUP > STICKS" : mi->name, stick_matrix ? C_WARM : c, FONT_SMALL);
-    int hx = 2 * (sz + 120) + 40;
-    static const char *const help[] = {
-        "L1/R1 pedal  up/down control  left/right turn",
-        "A footswitch  L2/R2 algorithm  L3/R3 freeze",
-        "B focus/matrix  X spring/latch  Y hold sticks",
-        "SELECT tap  START save  F1/F2 presets",
-    };
-    for (int i = 0; i < 4; i++) gfx_text(hx, y + i * 23 - 4, help[i], C_DIM, FONT_SMALL);
+    text_r(W - 16, 5, b, hold_on ? ACCENT : 0x9a9ca2, FONT_SMALL);
 }
 
 static void row_box(int x, int y, int w, int here, const char *label, const char *val, uint32_t c, const char *axn, uint32_t axc, float bar)
@@ -1108,23 +1214,20 @@ static void draw_overlay(void)
 
 static void draw(void)
 {
-    gfx_clear(C_BG);
+    if (!bg) make_bg();
+    if (bg) memcpy(surf->pixels, bg, sizeof(uint32_t) * W * H); /* the board and the bare boxes */
+    else gfx_clear(BOARD);
     draw_top();
     int ord[4] = {M_TONE, 0, 0, 0};
     eng_order(base.order, ord + 1);
-    /* the pedals in signal order, a cable between each */
-    for (int k = 0; k < 4; k++) {
-        int x = 12 + k * (PED_W + 8);
-        pedal(x, ord[k]);
-        if (k < 3) gfx_fill(x + PED_W, PED_Y + 20, 8, 4, C_DIM);
-    }
-    master_strip(12 + 4 * (PED_W + 8), W - 12 - (12 + 4 * (PED_W + 8)));
-    draw_bottom();
+    /* the boxes in signal order, then the master box */
+    for (int k = 0; k < 4; k++) pedal(PED_X(k), ord[k]);
+    master_strip(MST_X, MST_W);
     if (overlay) draw_overlay();
     if (SDL_GetTicks() < toast_until) {
         int w = gfx_text_w(toast_msg, FONT_LARGE) + 40;
-        gfx_fill_a(W / 2 - w / 2, H / 2 - 30, w, 54, 0x000000, 210);
-        gfx_rect(W / 2 - w / 2, H / 2 - 30, w, 54, 2, C_ACC);
+        gfx_fill_a(W / 2 - w / 2, H / 2 - 30, w, 54, 0x000000, 225);
+        gfx_rect(W / 2 - w / 2, H / 2 - 30, w, 54, 2, ACCENT);
         text_c(W / 2, H / 2 - 21, toast_msg, C_TEXT, FONT_LARGE);
     }
 }
@@ -1133,7 +1236,6 @@ static void draw(void)
 static SDL_Window *win;
 static SDL_Renderer *ren;
 static SDL_Texture *tex;
-static SDL_Surface *surf;
 static int screen_reset, draw_fails;
 static Uint32 last_rebuild;
 

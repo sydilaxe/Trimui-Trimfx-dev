@@ -52,20 +52,22 @@ at once. On the Brick Pro, the stick rings light up as you push.
 
 ## The pedalboard
 
-Everything is on one screen, laid out as a pedalboard with the pedals in signal order:
+Everything is on one screen: a board of raw-aluminium boxes with hand-stamped lettering, in signal order:
 - **Four pedals**: TONE, MOD, DELAY and REVERB.
-- **A MASTER strip**: IN and OUT gain, DRY, TEMPO, ORDER and PRESET, plus the levels.
+- **A master box**: IN and OUT gain, DRY, TEMPO, ORDER and PRESET, the IN / OUT lights and the two joysticks.
 
 Each pedal has:
-- an **LCD** showing the algorithm and the value of the control you are on
-- **four PERFORM knobs** (the stick-mapped ones)
-- **four DEEP sliders**
-- a **MIX fader**
-- a **footswitch** with its light: lit when on, red when bypassed, blue when frozen
+- **four big knobs**: the PERFORM set, on the sticks
+- **four small knobs**: the DEEP set
+- a big **ALGORITHM** selector knob, with a punched dot for each position
+- a **MIX** knob
+- a **Dymo-tape readout** of what you are turning
+- an **LED**: red when on, dark when bypassed, blue when frozen
+- a chrome **footswitch**
 
-Every knob and slider shows its stored setting and, in the stick's colour, where the stick has
-taken it. Under the board, the selected pedal's **two X/Y pads** show the left and right stick on
-its four knobs.
+Each knob's pointer shows the live value. A punched dot on the metal marks the stored setting, and
+a dot in the stick's colour appears while a stick moves it. The master box draws the **two
+joysticks** (gimbal, boot, the stick leaning where you push it) and names what they move.
 
 Devices, save / load / factory presets and the stick matrix are in two **overlays**. Open them
 from MASTER > SETUP or STICKS, or with HOME on the Brick Pro.
