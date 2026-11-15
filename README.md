@@ -353,7 +353,8 @@ means TrimFX's output is hitting full scale: turn MASTER > OUT down. The top bar
   playing:** one clock, so the input is passed through bit for bit (no resampling), with a smaller
   cushion that settles lower the longer it runs cleanly. The INPUT line then says "one clock:
   bit-exact". About 6-9 ms through the effects at 64 frames, plus the interface's own converters;
-- the audio threads keep to a core of their own (`TFX_PIN=0` in `launch.sh` turns this off);
+- the output thread (the effects) and the input thread each keep to a core of their own, the input
+  at the higher priority so it never misses a period (`TFX_PIN=0` in `launch.sh` turns this off);
 - the audio threads run at real-time priority, and a device that stops is reopened.
 
 SETUP has the audio rows:

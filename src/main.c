@@ -593,6 +593,10 @@ static void log_input(void)
     int ml = 0, hot = 0;
     for (int m = 0; m < NMOD; m++) {
         float db = 20.f * log10f(fmaxf(lv.mod_pk[m], 1e-5f));
+        if (base.m[m].bypass && db < -90.f) { /* bypassed (a DELAY / REVERB tail still shows its level) */
+            ml += snprintf(mods + ml, sizeof mods - (size_t)ml, "%s %s off", m ? "," : "", eng_info(m)->name);
+            continue;
+        }
         ml += snprintf(mods + ml, sizeof mods - (size_t)ml, "%s %s %+.1f", m ? "," : "", eng_info(m)->name, db);
         if (db > 0.f) hot = 1;
     }

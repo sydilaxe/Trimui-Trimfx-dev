@@ -35,7 +35,7 @@ static int env_buffer;                        /* <app>_BUFFER: fixed for every i
 static int buffer = 256;                      /* frames, now */
 static atomic_int in_ch = 2, out_ch = 2, in_pair, out_pair, in_block = 256, have_in, guard;
 static atomic_int rt_out, rt_in;              /* 0 not yet, 1 on, -1 refused */
-static int audio_core = -1;                   /* the core the audio threads keep to (-1: any) */
+static int out_core = -1, in_core = -1;      /* the cores the output and input threads keep to (-1: any) */
 static atomic_uint out_calls, out_clips, dropouts, hw_period_a;
 static atomic_ullong last_call_ns;
 static unsigned reopens, notes;
@@ -66,34 +66,38 @@ static uint64_t now_ns(void)
     return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
 }
 
-static void go_realtime(atomic_int *flag, int prio)
+static void go_realtime(atomic_int *flag, int prio, int core)
 {
     if (atomic_load_explicit(flag, memory_order_relaxed)) return;
     struct sched_param sp = {.sched_priority = prio};
     atomic_store(flag, pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp) == 0 ? 1 : -1);
-    if (audio_core >= 0) { /* a core of their own: the screen's drawing never makes them wait */
+    if (core >= 0) { /* a core of its own: neither the screen nor the other audio thread makes it wait */
         cpu_set_t set;
         CPU_ZERO(&set);
-        CPU_SET(audio_core, &set);
+        CPU_SET(core, &set);
         pthread_setaffinity_np(pthread_self(), sizeof set, &set);
     }
 }
 
-/* <app>_PIN (on unless 0): the audio threads on the last core, everything else (the main thread and
- * every thread it starts from now on: SDL's, the engine's helper) on the others */
+/* <app>_PIN (on unless 0): the output thread (the effects) on the last core, the input thread on the
+ * one before, everything else (the main thread and every thread it starts from now on: SDL's, the
+ * engine's helper) on the rest. One core for both audio threads made the input wait behind the
+ * effects at small buffers: the capture side overran, and an interface whose playback follows its
+ * capture (implicit feedback) slowed its output too */
 static void pin_cores(void)
 {
     char envn[64];
     snprintf(envn, sizeof envn, "%s_PIN", cfg.app);
     const char *e = getenv(envn);
     long n = sysconf(_SC_NPROCESSORS_ONLN);
-    if ((e && *e == '0') || n < 2) return;
+    if ((e && *e == '0') || n < 3) return;
     cpu_set_t set;
     CPU_ZERO(&set);
-    for (int i = 0; i < n - 1; i++) CPU_SET(i, &set);
+    for (int i = 0; i < n - 2; i++) CPU_SET(i, &set);
     if (pthread_setaffinity_np(pthread_self(), sizeof set, &set) != 0) return;
-    audio_core = (int)n - 1;
-    lg("AUDIO", "the audio threads on core %d, the rest on 0-%d (%s_PIN=0 turns this off)", audio_core, audio_core - 1, cfg.app);
+    out_core = (int)n - 1, in_core = (int)n - 2;
+    lg("AUDIO", "output thread on core %d, input thread on core %d, the rest on 0-%d (%s_PIN=0 turns this off)", out_core, in_core, in_core - 1,
+       cfg.app);
 }
 
 static void flush_denormals(void)
@@ -112,7 +116,7 @@ static void flush_denormals(void)
 static void in_cb(void *ud, Uint8 *stream, int len)
 {
     (void)ud;
-    go_realtime(&rt_in, 78);
+    go_realtime(&rt_in, 82, in_core); /* above the output: it only copies, and must never miss a period */
     int ch = atomic_load_explicit(&in_ch, memory_order_relaxed);
     ar_push(&ring, (const float *)stream, len / (int)(sizeof(float) * (unsigned)ch), ch, atomic_load_explicit(&in_pair, memory_order_relaxed), now_ns());
 }
@@ -123,7 +127,7 @@ static void out_cb(void *ud, Uint8 *stream, int len)
     static int ftz;
     static float in[MAXFR * 2], out[MAXFR * 2];
     if (!ftz) flush_denormals(), ftz = 1;
-    go_realtime(&rt_out, 80);
+    go_realtime(&rt_out, 80, out_core);
     uint64_t t = now_ns(), prev = atomic_exchange_explicit(&last_call_ns, t, memory_order_relaxed);
     /* a dropout: a gap past what the device can hold (two of its periods, or of our buffers) */
     unsigned per = atomic_load_explicit(&hw_period_a, memory_order_relaxed);

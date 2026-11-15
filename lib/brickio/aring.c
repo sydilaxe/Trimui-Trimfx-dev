@@ -83,6 +83,7 @@ int ar_pull(ARing *r, float *dst, int frames, int in_block, uint64_t now_ns)
         /* running dry: play out what there is (at least the fade's reserve, faded) and build a
          * bigger cushion */
         atomic_fetch_add(&r->underruns, 1);
+        r->ex_t = 0.0; /* exact: a disturbance, not drift: measure again from here */
         if (margin < 4096) atomic_store(&r->margin, margin + step);
         r->calm = 0.0;
         int got = fill > 3.0 ? (int)(fill - 3.0) : 0;
@@ -104,6 +105,7 @@ int ar_pull(ARing *r, float *dst, int frames, int in_block, uint64_t now_ns)
     if (fill > target + 3.0 * in_block + frames + 1024.0) {
         skip = floor(fill - target);
         atomic_fetch_add(&r->skips, 1);
+        r->ex_t = 0.0; /* exact: a burst, not drift: measure again from here */
         r->avg = target, r->integ = 0.0;
     }
     /* the drift loop: the cushion's level, averaged over about a second (the capture side arrives

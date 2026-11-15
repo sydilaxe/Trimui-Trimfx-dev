@@ -23,7 +23,7 @@ export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/lib"
 # export TFX_LEDS=0             # leave the LEDs alone
 # export TFX_LED_BAR=meter      # top bar: the output level meter instead of the chain
 # export TFX_LOG=2              # a status line every second in log.txt, and every button press
-# export TFX_PIN=0              # let the audio threads run on any core (by default they keep to the last one)
+# export TFX_PIN=0              # let the audio threads run on any core (by default: output on core 3, input on core 2)
 # export TFX_UPDATE=0           # never check GitHub for a new version (an update replaces this file:
 #                               #   set it again after)
 
