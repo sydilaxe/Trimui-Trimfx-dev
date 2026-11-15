@@ -123,6 +123,8 @@ void verb_reset(Verb *v, int algo)
     for (int i = 0; i < 3; i++) dly_clear(&v->spin[i].d), dly_clear(&v->cap[i].d), dly_clear(&v->invap[i].d);
     for (int i = 0; i < 16; i++) dly_clear(&v->cb[i]), v->cdamp[i] = 0.f;
     dly_clear(&v->inv);
+    v->gon = v->gon_t = 0;
+    v->crc = v->cha = v->cnorm = 0.f;
     for (int c = 0; c < 2; c++) {
         for (int k = 0; k < 4; k++) dly_clear(&v->tc[c][k]), v->tcl[c][k] = 0.f;
         for (int k = 0; k < 3; k++) dly_clear(&v->tdf[c][k].d);
@@ -376,8 +378,11 @@ static void classic(Verb *v, const float *p, int freeze, float *l, float *r, int
     float lc = expmap(p[7], 20.f, 1000.f);
     if (lc != v->clc_f) { v->clc_f = lc; bq_set(&v->clc[0], BQ_HP, lc, 0.7071f, 0); bq_set(&v->clc[1], BQ_HP, lc, 0.7071f, 0); }
     float norm = 0.55f * sqrtf(1.f - fminf(rc, 0.999f)) + 0.02f;
+    if (v->cnorm <= 0.f) v->crc = rc, v->cha = ha, v->cnorm = norm;
     for (int i = 0; i < n; i++) {
         v->size_g += (room - v->size_g) * 0.0003f;
+        /* glided: FREEZE and its thaw switch these at once, and the level jumped fivefold */
+        tap_glide(&v->crc, rc), tap_glide(&v->cha, ha), tap_glide(&v->cnorm, norm);
         float scale = powf(32.f, v->size_g);
         float xl = freeze ? 0.f : l[i], xr = freeze ? 0.f : r[i];
         dly_push(&v->cer[0], xl);
@@ -394,14 +399,14 @@ static void classic(Verb *v, const float *p, int freeze, float *l, float *r, int
         for (int c = 0; c < 16; c++) {
             float len = CB_D[c] * scale * TFX_SR + ((c & 3) == 0 ? w : 0.f);
             float z = dly_lin(&v->cb[c], len < 2.f ? 2.f : len);
-            v->cdamp[c] = v->cdamp[c] * (1.f - ha) + z * ha;
-            dly_push(&v->cb[c], a + v->cdamp[c] * rc);
+            v->cdamp[c] = v->cdamp[c] * (1.f - v->cha) + z * v->cha;
+            dly_push(&v->cb[c], a + v->cdamp[c] * v->crc);
             float mono = 0.5f * (CB_L[c] + CB_R[c]);
             ol += z * lerpf(mono, CB_L[c], ster);
             orr += z * lerpf(mono, CB_R[c], ster);
         }
-        l[i] = bq_run(&v->clc[0], ol * norm) + erl * erg * 0.5f;
-        r[i] = bq_run(&v->clc[1], orr * norm) + err * erg * 0.5f;
+        l[i] = bq_run(&v->clc[0], ol * v->cnorm) + erl * erg * 0.5f;
+        r[i] = bq_run(&v->clc[1], orr * v->cnorm) + err * erg * 0.5f;
     }
 }
 
@@ -484,23 +489,25 @@ static void inverse(Verb *v, const float *p, int freeze, float *l, float *r, int
     float jit = p[9];
     static const float JIT[INV_TAPS] = {0.1f, 0.7f, 0.3f, 0.9f, 0.2f, 0.5f, 0.8f, 0.4f, 0.6f, 0.0f, 0.75f, 0.35f, 0.15f, 0.95f, 0.55f, 0.25f,
                                         0.65f, 0.05f, 0.85f, 0.45f, 0.3f, 0.7f, 0.1f, 0.9f, 0.5f, 0.2f, 0.8f, 0.4f, 0.6f, 0.0f, 0.75f, 0.35f};
-    float gk[INV_TAPS], dt[INV_TAPS], tot = 0.f;
+    float gk[INV_TAPS], tk[INV_TAPS], tot = 0.f;
     for (int k = 0; k < INV_TAPS; k++) {
-        if (k >= ntap) { gk[k] = 0.f; dt[k] = 2.f; continue; }
+        if (k >= ntap) { gk[k] = 0.f; tk[k] = 0.f; continue; }
         float t = ((float)k + 0.5f + (JIT[k] - 0.5f) * jit) / (float)ntap;
-        dt[k] = 2.f + t * T;
+        tk[k] = t;
         float gated = 1.f - 0.25f * t, inv = t * t;
         gk[k] = lerpf(gated, inv, shape) * (k & 1 ? -1.f : 1.f);
         tot += fabsf(gk[k]);
     }
     float norm = 2.2f / tot;
+    if (!v->gon_t) v->gT = T, v->gon_t = 1;
     for (int i = 0; i < n; i++) {
+        float Tg = tap_glide(&v->gT, T);
         float x = freeze ? 0.f : 0.5f * (l[i] + r[i]);
         for (int k = 0; k < 3; k++) x = ap_run(&v->invap[k], x, dens);
         if (!freeze) dly_push(&v->inv, x);
         float ol = 0.f, orr = 0.f;
         for (int k = 0; k < ntap; k++) {
-            float y = dly_lin(&v->inv, dt[k]) * gk[k];
+            float y = dly_lin(&v->inv, 2.f + tk[k] * Tg) * gk[k];
             float pan = (k & 2 ? 1.f : -1.f) * spread;
             ol += y * (1.f - pan * 0.5f);
             orr += y * (1.f + pan * 0.5f);
@@ -551,7 +558,7 @@ static void temple(Verb *v, const float *p, const float *raw, int freeze, float 
                 acc += y;
             }
             acc *= 0.5f;
-            for (int k = 0; k < 3; k++) acc = lerpf(acc, ap_run(&v->tdf[c][k], acc, diff), diff > 0.01f ? 1.f : 0.f);
+            for (int k = 0; k < 3; k++) acc = lerpf(acc, ap_run(&v->tdf[c][k], acc, diff), clampf(diff * 40.f, 0.f, 1.f)); /* in by 0.025, not switched */
             if (c) r[i] = acc; else l[i] = acc;
         }
     }
@@ -636,16 +643,19 @@ void verb_process(Verb *v, int algo, const float *p, const float *raw, const Pat
     float bw = expmap(era, 5000.f, 20000.f), bk = onepole_coef(bw);
     int crush = era < 0.5f;
     float q = crush ? exp2f(-(7.f + 18.f * era)) : 0.f; /* 7 bits at the bottom .. 16 at the 90s */
+    /* the pre-delay is always written (switched on, it read stale memory: a click) and its time
+     * glides; the converters' filter always runs, so its state is current when it comes in */
+    if (!v->gon) v->gpre = pre, v->gon = 1;
     for (int i = 0; i < n; i++) {
         float x[2] = {l[i], r[i]};
+        float pg = tap_glide(&v->gpre, pre);
         for (int c = 0; c < 2; c++) {
             float y = x[c];
-            if (pre >= 1.f) { dly_push(&v->pre[c], y); y = dly_lin(&v->pre[c], pre); }
-            if (era < 0.98f) {
-                v->bw_z[c][0] += bk * (y - v->bw_z[c][0]);
-                v->bw_z[c][1] += bk * (v->bw_z[c][0] - v->bw_z[c][1]);
-                y = v->bw_z[c][1];
-            }
+            dly_push(&v->pre[c], y);
+            if (pg >= 1.f) y = dly_lin(&v->pre[c], pg);
+            v->bw_z[c][0] += bk * (y - v->bw_z[c][0]);
+            v->bw_z[c][1] += bk * (v->bw_z[c][0] - v->bw_z[c][1]);
+            if (era < 0.98f) y = v->bw_z[c][1];
             if (crush) y = q * floorf(y / q + 0.5f);
             if (c) r[i] = y; else l[i] = y;
         }

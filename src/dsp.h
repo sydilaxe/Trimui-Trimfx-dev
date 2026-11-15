@@ -70,6 +70,11 @@ static inline void dly_clear(Dly *d) { if (d->b) memset(d->b, 0, sizeof(float) *
 static inline void dly_push(Dly *d, float x) { d->b[d->w] = x; d->w = (d->w + 1) & d->mask; }
 /* d samples back (1 = the last written) */
 static inline float dly_tap(const Dly *d, uint32_t n) { return d->b[(d->w - n) & d->mask]; }
+/* a value that moves a delay tap, glided a sample at a time (~20 ms): stepped once a block, the tap
+ * jumps and the sound clicks; glided, it slides (a short pitch bend at most) */
+#define TAP_GLIDE 0.001f
+static inline float tap_glide(float *s, float target) { return *s += (target - *s) * TAP_GLIDE; }
+
 static inline float dly_lin(const Dly *d, float n)
 {
     if (n < 1.f) n = 1.f;

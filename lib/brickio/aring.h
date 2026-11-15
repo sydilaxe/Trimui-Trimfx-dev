@@ -11,8 +11,12 @@
  *     with no skips and no clicks
  *   - running dry: what is left fades out, the cushion builds up again with a bigger margin (a step
  *     the size of a capture buffer, 64-256 frames, to 4096); after every 30 s with no trouble the
- *     margin comes back down an eighth (to 64), so the latency settles as low as the interface
- *     allows. A new device or buffer starts the margin again from 128
+ *     margin comes back down an eighth (to 64; one interface both ways: every 15 s, to 32), so the
+ *     latency settles as low as the interface allows. A new device or buffer starts the margin again from 128
+ *   - one interface both ways (locked): one clock, so no resampling at all: the input is read
+ *     sample for sample (bit-exact, no interpolation). Should the level still creep (an interface
+ *     whose two directions run on different clocks after all), it slips by whole frames (4 at most
+ *     a buffer) under a crossfade, and if those slips add up to over 100 ppm it follows the drift as above instead
  *   - far too full (after a stall): skips back to the cushion with a crossfade
  *   - channels: the writer takes one pair from a multichannel interface (or both sides from a mono
  *     one) */
@@ -38,6 +42,11 @@ typedef struct {
     atomic_uint underruns, skips, overflows, clips, fill, margin;
     atomic_int ppm;           /* the drift being followed, parts per million */
     double calm;              /* seconds since the last underrun (the reader's) */
+    atomic_uint slips;        /* exact: whole-frame corrections made */
+    atomic_int exact;         /* 1 while the input is read sample for sample */
+    int slipping;             /* exact: stepping the level back to the target */
+    int resample;             /* locked, but the clocks proved to differ: resample after all */
+    double ex_t, ex_net, ex_tgt0; /* exact: seconds measured, frames slipped net, the target then */
     atomic_int locked;        /* set by the owner: input and output are one interface (one clock, one
                                * period): the cushion can be half an output buffer smaller */
 } ARing;

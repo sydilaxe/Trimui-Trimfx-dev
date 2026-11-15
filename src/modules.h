@@ -80,6 +80,8 @@ typedef struct {
     /* strings (Haible's 40-band string filter) */
     Svf sb[STR_BANDS];
     float sg[STR_BANDS], sgain[STR_BANDS], sfbk[2], svac, sscan;
+    float gdt; /* SPIRAL's loop time, glided (tap_glide) */
+    int gon;
 } Modu;
 int modu_init(Modu *m);
 void modu_free(Modu *m);
@@ -140,6 +142,9 @@ typedef struct {
     Wander ew;
     /* DUCK (deep): the input's level, the gain */
     float dk_env, dk_g;
+    /* taps moved by SWING and SPREAD, glided (tap_glide); gon 0: snap to them first */
+    float gsw, gsp;
+    int gon;
 } Delay;
 int delay_init(Delay *d);
 void delay_free(Delay *d);
@@ -210,6 +215,9 @@ typedef struct {
     Ap ndf[2][2];
     /* DUCK (deep): the input's level, the gain */
     float dk_env, dk_g;
+    float gpre, gT; /* pre-delay and INVERSE's time, glided (tap_glide) */
+    int gon, gon_t;
+    float crc, cha, cnorm; /* CLASSIC's feedback, damping and level, glided (FREEZE snapped them) */
 } Verb;
 int verb_init(Verb *v);
 void verb_free(Verb *v);

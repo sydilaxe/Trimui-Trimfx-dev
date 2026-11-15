@@ -216,7 +216,9 @@ static void spiral(Modu *m, const float *p, const float *raw, const Patch *pt, f
     float fb = p[1] * 0.97f, dtime = expmap(p[2], 0.005f, 1.5f) * TFX_SR;
     float spread = p[3], lrate = sync_hz(raw[8], pt->bpm, expmap(p[4], 0.02f, 6.f)), ldepth = p[5];
     float lpk = onepole_coef(expmap(p[6], 300.f, 16000.f)), ring = p[7];
+    if (!m->gon) m->gdt = dtime, m->gon = 1;
     for (int i = 0; i < n; i++) {
+        float dt = tap_glide(&m->gdt, dtime);
         m->slfo += lrate / TFX_SR;
         m->slfo -= floorf(m->slfo);
         float wob = lfo_sin(m->slfo) * ldepth * (fabsf(shift) * 0.6f + 6.f);
@@ -225,7 +227,7 @@ static void spiral(Modu *m, const float *p, const float *raw, const Patch *pt, f
             float hz = (shift + wob) * (c ? 1.f - 2.f * spread : 1.f);
             m->sph[c] += hz / TFX_SR;
             m->sph[c] -= floorf(m->sph[c]);
-            float back = dly_lin(&m->sdl[c], dtime);
+            float back = dly_lin(&m->sdl[c], dt);
             float v = x[c] + fb * back, re, im;
             hilbert(m, c, v, &re, &im);
             float co = lfo_sin(m->sph[c] + 0.25f), si = lfo_sin(m->sph[c]);

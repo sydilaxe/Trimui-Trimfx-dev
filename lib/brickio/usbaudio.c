@@ -14,6 +14,7 @@
 #include <string.h>
 #include <strings.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "aring.h"
 
@@ -34,6 +35,7 @@ static int env_buffer;                        /* <app>_BUFFER: fixed for every i
 static int buffer = 256;                      /* frames, now */
 static atomic_int in_ch = 2, out_ch = 2, in_pair, out_pair, in_block = 256, have_in, guard;
 static atomic_int rt_out, rt_in;              /* 0 not yet, 1 on, -1 refused */
+static int audio_core = -1;                   /* the core the audio threads keep to (-1: any) */
 static atomic_uint out_calls, out_clips, dropouts, hw_period_a;
 static atomic_ullong last_call_ns;
 static unsigned reopens, notes;
@@ -69,6 +71,29 @@ static void go_realtime(atomic_int *flag, int prio)
     if (atomic_load_explicit(flag, memory_order_relaxed)) return;
     struct sched_param sp = {.sched_priority = prio};
     atomic_store(flag, pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp) == 0 ? 1 : -1);
+    if (audio_core >= 0) { /* a core of their own: the screen's drawing never makes them wait */
+        cpu_set_t set;
+        CPU_ZERO(&set);
+        CPU_SET(audio_core, &set);
+        pthread_setaffinity_np(pthread_self(), sizeof set, &set);
+    }
+}
+
+/* <app>_PIN (on unless 0): the audio threads on the last core, everything else (the main thread and
+ * every thread it starts from now on: SDL's, the engine's helper) on the others */
+static void pin_cores(void)
+{
+    char envn[64];
+    snprintf(envn, sizeof envn, "%s_PIN", cfg.app);
+    const char *e = getenv(envn);
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    if ((e && *e == '0') || n < 2) return;
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    for (int i = 0; i < n - 1; i++) CPU_SET(i, &set);
+    if (pthread_setaffinity_np(pthread_self(), sizeof set, &set) != 0) return;
+    audio_core = (int)n - 1;
+    lg("AUDIO", "the audio threads on core %d, the rest on 0-%d (%s_PIN=0 turns this off)", audio_core, audio_core - 1, cfg.app);
 }
 
 static void flush_denormals(void)
@@ -432,6 +457,7 @@ void ua_start(const UaConfig *c)
 {
     cfg = *c;
     ar_init(&ring);
+    pin_cores();
     load();
     char envn[64];
     snprintf(envn, sizeof envn, "%s_BUFFER", cfg.app);
@@ -610,6 +636,7 @@ void ua_status(UaStatus *s)
     s->dropouts = atomic_load(&dropouts), s->in_clips = atomic_load(&ring.clips), s->out_clips = atomic_load(&out_clips);
     s->reopens = reopens;
     s->cushion = atomic_load(&ring.fill), s->margin = atomic_load(&ring.margin), s->drift_ppm = atomic_load(&ring.ppm);
+    s->exact = atomic_load(&ring.exact) && in_dev, s->slips = atomic_load(&ring.slips);
     unsigned per = atomic_load(&hw_period_a);
     float outbuf = 2.f * (float)((int)per > buffer ? (int)per : buffer);
     s->latency_ms = (float)(s->cushion + outbuf) * 1000.f / RATE;

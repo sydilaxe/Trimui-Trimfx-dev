@@ -78,8 +78,9 @@ static void run(const Case *c)
     }
     unsigned under = ring.underruns - u0, skips = ring.skips - s0;
     double lat_ms = fill_n ? fill_sum / fill_n / 48.0 : 0, ppm = fill_n ? ppm_sum / fill_n : 0;
-    printf("%-34s underruns %u (settled %u), skips %u, clicks %d, drift followed %+.0f ppm, cushion %.1f ms (margin %u)\n", c->name,
-           ring.underruns, under, skips, clicks, ppm, lat_ms, ring.margin);
+    printf("%-34s underruns %u (settled %u), skips %u, clicks %d, drift followed %+.0f ppm, cushion %.1f ms (margin %u)%s\n", c->name,
+           ring.underruns, under, skips, clicks, ppm, lat_ms, ring.margin, ring.exact ? ", exact" : "");
+    if (c->locked) printf("    slips %u, resample %d\n", ring.slips, ring.resample);
     CHECK(live > 0, "%s: sound came through", c->name);
     CHECK(clicks == 0, "%s: %d clicks", c->name, clicks);
     if (!c->stall_ms) {
@@ -135,6 +136,9 @@ int main(void)
         {"one interface, 256, smaller cushion", 256, 256, 2, 0, 20, 1.0, 90, 0, 0, 30, 1},
         {"one interface, 128, smaller cushion", 128, 128, 2, 0, 20, 1.0, 90, 0, 0, 30, 1},
         {"one interface, 64, smaller cushion", 64, 64, 2, 0, 20, 0.5, 90, 0, 0, 30, 1},
+        {"one interface, one clock, 128", 128, 128, 2, 0, 0, 0.5, 90, 0, 0, 30, 1},
+        {"one interface, one clock, 64", 64, 64, 2, 0, 0, 0.5, 90, 0, 0, 30, 1},
+        {"locked, but 400 ppm apart", 128, 128, 2, 0, 400, 0.5, 120, 0, 0, 60, 1},
     };
     for (unsigned i = 0; i < sizeof C / sizeof *C; i++) run(&C[i]);
     channels();

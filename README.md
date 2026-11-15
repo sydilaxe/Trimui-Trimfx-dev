@@ -349,7 +349,11 @@ means TrimFX's output is hitting full scale: turn MASTER > OUT down. The top bar
   1024-frame periods add about 60 ms);
 - it runs 32-bit float, so a 24-bit / 48 kHz interface keeps its 24 bits;
 - it offers each channel pair of a multichannel interface;
-- input and output can be different interfaces;
+- input and output can be different interfaces. **One interface both ways is best for real-time
+  playing:** one clock, so the input is passed through bit for bit (no resampling), with a smaller
+  cushion that settles lower the longer it runs cleanly. The INPUT line then says "one clock:
+  bit-exact". About 6-9 ms through the effects at 64 frames, plus the interface's own converters;
+- the audio threads keep to a core of their own (`TFX_PIN=0` in `launch.sh` turns this off);
 - the audio threads run at real-time priority, and a device that stops is reopened.
 
 SETUP has the audio rows:
@@ -375,10 +379,12 @@ plus every button and MIDI message. `TFX_LOG=2` in `launch.sh` starts in DETAIL.
 | `HW` | what the hardware really runs at, from the kernel: the format (`S16_LE`, `S24_3LE`, `S32_LE`), rate, period |
 | `STAT` | the audio thread's load (avg / peak), **dropouts** (the output ran dry: a bigger `TFX_BUFFER` helps), the longest gap between callbacks |
 | `INPUT` | since the last line: input **underruns** and **skips** (the USB input's timing), **output dropouts**, **input clips**, **output clips**; the cushion, the drift followed, the latency, the buffer, DIRECT or shared |
+| `LEVEL` | how hot each stage ran since the last line, in dBFS (0 = full scale): the input, each module's output, and what went into the safety limiter |
+| `LIMIT` | the safety limiter at the end cut in (at about -1 dBFS): each cut can be heard as a click. Turn MASTER > OUT, or the hot module, down |
 | `JUMP` | a click made inside TrimFX's own output |
 | `HINT` | what to change, when the log sees a problem |
 
-A crackle with none of these counting (no dropouts, underruns, skips, clips or JUMP lines) happens
+A crackle with none of these counting (no dropouts, underruns, skips, clips, LIMIT or JUMP lines) happens
 after TrimFX, in the driver or the interface. To share a log, play until it crackles, quit TrimFX
 (MENU), and send `log.txt`.
 

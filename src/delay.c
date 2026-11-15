@@ -83,6 +83,7 @@ void delay_reset(Delay *d, int algo)
     for (int k = 0; k < 4; k++) d->ptime[k] = 0.f;
     d->eh[0] = d->eh[1] = d->eph = d->ehiss[0] = d->ehiss[1] = 0.f;
     d->egate = d->etgt = 1.f;
+    d->gon = 0;
 }
 
 /* the tempo divisions, in quarter notes */
@@ -202,8 +203,10 @@ static void rhythm(Delay *d, const float *p, const float *raw, const Patch *pt, 
     for (int t = 0; t < pat->n; t++) pg[t] = powf(pat->gain[t], accent), tg += pg[t];
     float norm = 1.2f / sqrtf(tg);
     if (d->time_s <= 0.f) d->time_s = step;
+    if (!d->gon) d->gsw = swing, d->gon = 1;
     for (int i = 0; i < n; i++) {
         d->time_s += (step - d->time_s) * 0.0005f;
+        float sw = tap_glide(&d->gsw, swing);
         d->wph += wrate / TFX_SR;
         d->wph -= floorf(d->wph);
         float wo = wob * (0.6f * lfo_sin(d->wph) + 0.4f * wander_tick(&d->ww, &d->rng, 1.3f));
@@ -213,7 +216,7 @@ static void rhythm(Delay *d, const float *p, const float *raw, const Patch *pt, 
         for (int c = 0; c < 2; c++) {
             for (int t = 0; t < pat->n; t++) {
                 float s = pat->step[t];
-                float dt = s * st + (((int)s & 1) ? swing * st : 0.f) + wo;
+                float dt = s * st + (((int)s & 1) ? sw * st : 0.f) + wo;
                 float pan = pat->pan[t] * spread;
                 float g = pg[t] * sqrtf(0.5f * (1.f + (c ? pan : -pan)));
                 out[c] += g * dly_lin(&d->b[c], dt);
@@ -248,8 +251,10 @@ static void reverso(Delay *d, const float *p, const float *raw, const Patch *pt,
     float lpk = freeze ? 1.f : onepole_coef(expmap(p[5], 900.f, 18000.f)), spread = p[6], swell = p[7];
     if (d->time_s <= 0.f) d->time_s = T;
     float stime = 0.002f + swell * swell * 3.f; /* the swell's rise, s */
+    if (!d->gon) d->gsp = spread, d->gon = 1;
     for (int i = 0; i < n; i++) {
         d->time_s += (T - d->time_s) * 0.0003f;
+        float sp = tap_glide(&d->gsp, spread);
         float dr = 1.f + drift * wander_tick(&d->rw, &d->rng, drate);
         /* auto-swell: duck at each new phrase, then rise */
         float lev = fabsf(l[i]) + fabsf(r[i]);
@@ -264,7 +269,7 @@ static void reverso(Delay *d, const float *p, const float *raw, const Patch *pt,
             d->swell = 1.f;
         float x[2] = {l[i], r[i]};
         for (int c = 0; c < 2; c++) {
-            float Tc = d->time_s * (c ? 1.f + 0.5f * spread : 1.f) * dr;
+            float Tc = d->time_s * (c ? 1.f + 0.5f * sp : 1.f) * dr;
             float fwd = dly_lin(&d->b[c], Tc);
             /* two reverse heads half a segment apart: each reads backwards through the last Tc */
             float rev = 0.f;
@@ -354,14 +359,16 @@ static void shimmer(Delay *d, const float *p, const float *raw, const Patch *pt,
     float lpk = onepole_coef(expmap(p[4], 1500.f, 18000.f)), diff = p[5] * 0.7f, spread = p[6], drift = p[7] * 0.01f;
     if (d->time_s <= 0.f) d->time_s = T;
     const float W = expmap(p[10], 0.02f, 0.12f) * TFX_SR;
+    if (!d->gon) d->gsp = spread, d->gon = 1;
     for (int i = 0; i < n; i++) {
         d->time_s += (T - d->time_s) * 0.0003f;
+        float sp = tap_glide(&d->gsp, spread);
         float dr = 1.f + drift * wander_tick(&d->ww, &d->rng, drate);
         d->shph += (1.f - ratio) / W;
         d->shph -= floorf(d->shph);
         float x[2] = {l[i], r[i]};
         for (int c = 0; c < 2; c++) {
-            float y = dly_lin(&d->b[c], d->time_s * (c ? 1.f + 0.33f * spread : 1.f) * dr);
+            float y = dly_lin(&d->b[c], d->time_s * (c ? 1.f + 0.33f * sp : 1.f) * dr);
             dly_push(&d->psh[c], y);
             float ps = 0.f;
             for (int h = 0; h < 2; h++) {
@@ -500,12 +507,14 @@ static void dub(Delay *d, const float *p, const float *raw, const Patch *pt, flo
     float fb = freeze ? 1.f : p[1] * 1.2f, g = svf_g(expmap(p[2], 100.f, 8000.f)), k = 1.f / expmap(p[3], 0.6f, 10.f);
     float type = p[4], drive = 1.f + p[5] * 4.f, spread = p[6], wob = p[7] * 0.004f * TFX_SR;
     if (d->time_s <= 0.f) d->time_s = T;
+    if (!d->gon) d->gsp = spread, d->gon = 1;
     for (int i = 0; i < n; i++) {
         d->time_s += (T - d->time_s) * 0.0001f;
+        float sp = tap_glide(&d->gsp, spread);
         d->wph += wrate / TFX_SR; d->wph -= floorf(d->wph);
         float wo = wob * (0.5f + 0.5f * lfo_sin(d->wph));
         float y[2], x[2] = {l[i], r[i]};
-        for (int c = 0; c < 2; c++) y[c] = dly_lin(&d->b[c], d->time_s * (c ? 1.f + 0.5f * spread : 1.f) + wo + 4.f);
+        for (int c = 0; c < 2; c++) y[c] = dly_lin(&d->b[c], d->time_s * (c ? 1.f + 0.5f * sp : 1.f) + wo + 4.f);
         for (int c = 0; c < 2; c++) {
             /* ping-pong as SPREAD rises: each side's repeats come back on the other */
             float back = lerpf(y[c], y[1 - c], spread);
@@ -587,8 +596,10 @@ static void erode(Delay *d, const float *p, const float *raw, const Patch *pt, f
     float lpk = onepole_coef(expmap(p[4], 800.f, 18000.f)), drop = p[5], spread = p[6], wob = p[7] * 0.004f * TFX_SR;
     float hiss = p[10] * p[10] * 0.01f;
     if (d->time_s <= 0.f) d->time_s = T;
+    if (!d->gon) d->gsp = spread, d->gon = 1;
     for (int i = 0; i < n; i++) {
         d->time_s += (T - d->time_s) * 0.0002f;
+        float sp = tap_glide(&d->gsp, spread);
         d->wph += 0.37f / TFX_SR; d->wph -= floorf(d->wph);
         float wo = wob * (0.5f + 0.5f * (0.6f * lfo_sin(d->wph) + 0.4f * wander_tick(&d->ew, &d->rng, 1.7f)));
         /* dropouts: now and then a stretch of the memory reads back as nothing */
@@ -601,7 +612,7 @@ static void erode(Delay *d, const float *p, const float *raw, const Patch *pt, f
         if (tick) d->eph -= floorf(d->eph);
         float x[2] = {l[i], r[i]};
         for (int c = 0; c < 2; c++) {
-            float y = dly_lin(&d->b[c], d->time_s * (c ? 1.f + 0.5f * spread : 1.f) + wo + 4.f);
+            float y = dly_lin(&d->b[c], d->time_s * (c ? 1.f + 0.5f * sp : 1.f) + wo + 4.f);
             if (tick) d->eh[c] = q * floorf(y / q + 0.5f);
             float v = d->eh[c] * d->egate;
             d->lp[c] += lpk * (v - d->lp[c]);
