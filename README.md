@@ -333,6 +333,24 @@ SDL2) and writes the `.muxapp`. `make test` runs the engine tests. Also:
 - `make shots` saves screenshots of every page.
 - `make wavs` writes a WAV of every algorithm on a test signal.
 
+## Updates
+
+TrimFX updates itself from this repository's latest GitHub release, like Conduit, Columbia Street and
+Jaffedrone. A few seconds after it starts (once Wi-Fi is up), it asks GitHub for the latest release,
+retrying every minute up to five times. If a newer version is out, a prompt comes up over the board
+while the sound carries on. **A** downloads it, checks it and swaps the new files in, then TrimFX
+restarts as the new version. **B** waits; **SETUP > UPDATES** offers it again, or checks by hand.
+An update never touches your preset slots, `state.txt`, `midimap.txt` or the log. A download that
+fails or is damaged changes nothing. `TFX_UPDATE=0` in `launch.sh` turns the check off.
+
+For releases to reach installed copies, keep three things the same:
+- they must be full releases marked Latest, tagged `v<number>...` higher than the last (the release
+  workflow does this);
+- the package must stay named `TrimFX-mustardos.muxapp`;
+- the app must stay in its `TrimFX/` folder.
+
+`make update-test` (CI runs it) installs a fake release over a test folder, end to end.
+
 ## Releasing
 
 Tag a commit on `main` and push the tag:
@@ -357,6 +375,9 @@ TrimFX is GPL-3.0-or-later (`LICENSE`). It builds on:
 - **Conduit** (sydilaxe, GPL-3): the MidiVerb II Bloom emulation, exact and adjustable. That code
   follows thement's [midiverb_emulator](https://github.com/thement/midiverb_emulator) analysis.
 - **SP-1 Master** (sydilaxe, MIT, `src/master/`): the four mastering chains.
+- **The self-updater** (`src/update.c`, `src/net.c`, from Conduit, Columbia Street and RadioScan,
+  GPL-3) with **Mbed TLS** 3.6.7 (Apache-2.0, fetched at build time from its pinned release;
+  `LICENSE-mbedtls.txt` ships in the package) and the Mozilla CA bundle (`cacert.pem`, MPL-2.0).
 - **Trimui-Brick-Resources / Jaffedrone** (sydilaxe): input, LEDs, performance log, drawing and
   font (Noto Sans Mono, OFL), the SDL2 headers and the build approach.
 - **ClassicReverb RE-04** (AnClark, GPL-3): CLASSIC uses its reverse-engineered structure and

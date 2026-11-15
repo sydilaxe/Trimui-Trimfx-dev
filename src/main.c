@@ -32,6 +32,8 @@
 #include "engine.h"
 #include "gfx.h"
 #include "midi.h"
+#include "net.h"
+#include "update.h"
 #include "perflog.h"
 #include "ringleds.h"
 
@@ -363,7 +365,7 @@ enum { COL_TONE, COL_MOD, COL_DELAY, COL_VERB, COL_MASTER, NCOL };
 enum { R_ALGO, R_K1, R_K2, R_K3, R_K4, R_D1, R_D2, R_D3, R_D4, R_MIX, NPROW };
 enum { MR_IN, MR_OUT, MR_DRY, MR_TEMPO, MR_ORDER, MR_SLOT, MR_SETUP, MR_STICKS, NMROW };
 enum { OV_NONE, OV_SETUP, OV_STICKS, OV_DEEP };
-enum { SR_INPUT, SR_OUTPUT, SR_SAVE, SR_LOAD, SR_FACTORY, SR_MIDI, SR_MIDIMAP, SR_INIT, NSROW };
+enum { SR_INPUT, SR_OUTPUT, SR_SAVE, SR_LOAD, SR_FACTORY, SR_MIDI, SR_MIDIMAP, SR_UPDATE, SR_INIT, NSROW };
 #define NXROW (3 + NAX * 2 * 2)
 static int col = COL_MOD, focus_mod = M_MOD;
 static int sel[NCOL] = {R_K1, R_K1, R_K1, R_K1, MR_IN};
@@ -574,6 +576,7 @@ static int init_armed;
 /* what a MIDI mapping does (see the MIDI section) */
 enum { MA_PARAM, MA_MIX, MA_ALGO, MA_ALGOSTEP, MA_BYPASS, MA_FREEZE, MA_MASTER, MA_ORDER, MA_PAGE, MA_PAGETO,
        MA_PRESET, MA_SAVE, MA_TAP, MA_STICK, MA_JOG, MA_N };
+static void update_row_a(void);
 static int midi_learn;      /* MIDI LEARN: on until B (or SELECT held) */
 static int learn_custom;    /* 1: a button chose the target (footswitch, freeze...), not the board */
 static signed char learn_act, learn_mod, learn_arg;
@@ -672,6 +675,7 @@ static void press_a(void)
             overlay = OV_NONE;
             learn_on(1);
             return;
+        case SR_UPDATE: update_row_a(); return;
         case SR_MIDIMAP: {
             char path[600];
             midimap_path(path, sizeof path);
@@ -718,6 +722,70 @@ static Uint32 rep_at[BI_COUNT];
 static int rep_n[BI_COUNT];
 static int running = 1;
 
+/* ---------------------------------------------------------------- self-update (update.h) */
+/* As in Conduit, Columbia Street and Jaffedrone: a few seconds after starting (so Wi-Fi is up), then
+ * every minute until GitHub has answered, five tries; a newer release brings up a prompt (the sound
+ * goes on underneath); A downloads it and swaps the files in, keeping the presets, state, MIDI map
+ * and log; the app then quits with RELAUNCH_STATUS and launch.sh starts the new version. */
+static int upd_auto, upd_tries, upd_asked, upd_open, upd_net;
+static Uint32 upd_next, relaunch_at;
+
+static void upd_net_init(void)
+{
+    if (upd_net) return;
+    char ca[600];
+    snprintf(ca, sizeof ca, "%s/cacert.pem", app_dir);
+    net_init(ca);
+    upd_net = 1;
+}
+
+static void update_watch(Uint32 now)
+{
+    const UpdateStatus *u = update_status();
+    static int logged;
+    if ((u->state == UP_CURRENT || u->state == UP_AVAILABLE) && !logged) {
+        logged = 1;
+        perf_log("UPDATE", "the latest release is v%s, this is v" TFX_VERSION, u->latest);
+    }
+    if (upd_auto && (u->state == UP_IDLE || u->state == UP_CHECK_FAILED) && upd_tries < 5 && (Sint32)(now - upd_next) >= 0) {
+        if (u->state == UP_CHECK_FAILED) perf_log("UPDATE", "%s", u->err);
+        upd_tries++;
+        upd_next = now + 60000;
+        update_check_start();
+    }
+    if (u->state == UP_AVAILABLE && !upd_asked) upd_asked = upd_open = 1;
+    if (u->state == UP_INSTALLED && !relaunch_at) {
+        perf_log("UPDATE", "v%s installed, restarting", u->latest);
+        relaunch_at = now + 1200; /* long enough to read "restarting" */
+        if (!relaunch_at) relaunch_at = 1;
+    }
+    if (relaunch_at && (Sint32)(now - relaunch_at) >= 0) running = 0;
+}
+
+/* SETUP > UPDATES: A checks now, or opens the prompt when a release is waiting */
+static void update_row_a(void)
+{
+    const UpdateStatus *u = update_status();
+    if (u->state == UP_AVAILABLE || u->state == UP_FAILED) { overlay = OV_NONE; upd_open = 1; return; }
+    if (u->state == UP_CHECKING || u->state == UP_INSTALLING || u->state == UP_INSTALLED) return;
+    upd_net_init();
+    upd_asked = 0;
+    update_check_start();
+    toast("CHECKING FOR AN UPDATE");
+}
+
+/* the prompt owns the buttons while it is up: A updates (or tries again), B closes it */
+static void update_button(BiButton b)
+{
+    const UpdateStatus *u = update_status();
+    if (u->state == UP_INSTALLING || u->state == UP_INSTALLED) return;
+    if (b == BI_A && (u->state == UP_AVAILABLE || u->state == UP_FAILED)) { update_install_start(app_dir); return; }
+    if (b == BI_B || b == BI_MENU) {
+        upd_open = 0;
+        if (u->state == UP_AVAILABLE) toast("v%s: SETUP > UPDATES WHEN YOU WANT IT", u->latest);
+    }
+}
+
 static void move_row(int dir)
 {
     int *s = sel_now(), n = rows_now();
@@ -730,6 +798,7 @@ static void button(BiButton b, int down)
     if (!down) return;
     rep_at[b] = SDL_GetTicks() + 350;
     rep_n[b] = 0;
+    if (upd_open) { update_button(b); return; }
     if (b == BI_SELECT) { sel_down_at = SDL_GetTicks(); sel_long = 0; }
     if (b != BI_A) init_armed = 0;
     if (midi_learn && !overlay) {
@@ -1752,6 +1821,20 @@ static void draw_overlay(void)
             case SR_FACTORY: { Patch tmp; snprintf(lab, sizeof lab, "FACTORY"); snprintf(v, sizeof v, "%d %s  (A)", factory_pick + 1, patch_factory(&tmp, factory_pick)); } break;
             case SR_MIDI: snprintf(lab, sizeof lab, "MIDI LEARN"); snprintf(v, sizeof v, "%s  (A)", midi_count() ? midi_name() : "NO MIDI DEVICE"); break;
             case SR_MIDIMAP: snprintf(lab, sizeof lab, "MIDI MAP"); snprintf(v, sizeof v, "%d MAPPINGS   TEMPLATE (A)", nmap); break;
+            case SR_UPDATE: {
+                const UpdateStatus *u = update_status();
+                snprintf(lab, sizeof lab, "UPDATES");
+                switch (u->state) {
+                case UP_CHECKING: snprintf(v, sizeof v, "v%s  CHECKING...", TFX_VERSION); break;
+                case UP_CURRENT: snprintf(v, sizeof v, "v%s  THE LATEST  CHECK (A)", TFX_VERSION); break;
+                case UP_AVAILABLE: snprintf(v, sizeof v, "v%s OUT  UPDATE (A)", u->latest); break;
+                case UP_CHECK_FAILED: snprintf(v, sizeof v, "v%s  NO ANSWER  CHECK (A)", TFX_VERSION); break;
+                case UP_INSTALLING: snprintf(v, sizeof v, "DOWNLOADING %d%%", u->progress); break;
+                case UP_INSTALLED: snprintf(v, sizeof v, "UPDATED: RESTARTING"); break;
+                case UP_FAILED: snprintf(v, sizeof v, "FAILED  TRY AGAIN (A)"); break;
+                default: snprintf(v, sizeof v, "v%s  CHECK (A)", TFX_VERSION); break;
+                }
+            } break;
             default: snprintf(lab, sizeof lab, "INIT ALL"); snprintf(v, sizeof v, "A, twice"); break;
             }
             row_box(x + 16, ry + r * 38, w - 32, ov_sel[OV_SETUP] == r, lab, v, C_ACC, NULL, 0, -1.f);
@@ -1831,6 +1914,37 @@ static void draw(void)
         gfx_rect(bx, by, bw, 66, 2, ACCENT);
         text_c(W / 2, by + 6, l1, ACCENT, FONT_LARGE);
         text_c(W / 2, by + 40, l2, C_TEXT, FONT_SMALL);
+    }
+    if (upd_open) {
+        const UpdateStatus *u = update_status();
+        int st = u->state, w = 720, h = 300, x = W / 2 - w / 2, y = 200;
+        char b2[200];
+        gfx_fill_a(0, 0, W, H, 0x000000, 160);
+        gfx_fill(x, y, w, h, C_BG);
+        gfx_fill(x, y, w, 4, ACCENT);
+        gfx_rect(x, y, w, h, 2, ACCENT);
+        snprintf(b2, sizeof b2, "TrimFX v%s is out", u->latest);
+        text_c(W / 2, y + 30, b2, ACCENT, FONT_LARGE);
+        text_c(W / 2, y + 78, "this is v" TFX_VERSION, C_DIM, FONT_SMALL);
+        if (st == UP_INSTALLING || st == UP_INSTALLED) {
+            int bw = 520, bx = W / 2 - bw / 2, pc = st == UP_INSTALLED ? 100 : u->progress;
+            pc = pc < 0 ? 0 : pc > 100 ? 100 : pc;
+            gfx_fill(bx, y + 140, bw, 24, C_PANEL);
+            gfx_fill(bx + 3, y + 143, (bw - 6) * pc / 100, 18, ACCENT);
+            if (st == UP_INSTALLED) snprintf(b2, sizeof b2, "UPDATED: RESTARTING...");
+            else snprintf(b2, sizeof b2, "DOWNLOADING... %d%%", pc);
+            text_c(W / 2, y + 186, b2, C_TEXT, FONT_SMALL);
+        } else if (st == UP_FAILED) {
+            snprintf(b2, sizeof b2, "%s", u->err);
+            fit(b2, w - 60);
+            text_c(W / 2, y + 136, b2, C_BAD, FONT_SMALL);
+            text_c(W / 2, y + 170, "nothing was changed", C_DIM, FONT_SMALL);
+            text_c(W / 2, y + h - 50, "A try again    B close", C_TEXT, FONT_SMALL);
+        } else {
+            text_c(W / 2, y + 136, "Download it and restart?", C_TEXT, FONT_SMALL);
+            text_c(W / 2, y + 170, "your presets, state and MIDI map stay as they are", C_DIM, FONT_SMALL);
+            text_c(W / 2, y + h - 50, "A update and restart    B not now", C_TEXT, FONT_SMALL);
+        }
     }
     if (SDL_GetTicks() < toast_until) {
         int w = gfx_text_w(toast_msg, FONT_LARGE) + 40;
@@ -1935,6 +2049,17 @@ static void tour(const char *path)
     draw();
     shot(path, "learn");
     midi_learn = 0;
+    /* the update prompt, as if v9.9.9 were out */
+    {
+        UpdateStatus *u = update_status();
+        snprintf(u->latest, sizeof u->latest, "9.9.9");
+        u->state = UP_AVAILABLE;
+        upd_open = 1;
+        draw();
+        shot(path, "update");
+        upd_open = 0;
+        u->state = UP_IDLE;
+    }
     base = keep;
 }
 
@@ -1977,6 +2102,14 @@ int main(int argc, char **argv)
     build_live(0.f);
     publish(&live);
     midimap_load();
+    /* the self-updater: on by default on the TrimUI; TFX_UPDATE=0 (in launch.sh) turns it off,
+     * TFX_UPDATE=1 turns it on in a desktop build */
+#ifdef TFX_TRIMUI
+    upd_auto = !shot_path;
+#endif
+    if (getenv("TFX_UPDATE")) upd_auto = atoi(getenv("TFX_UPDATE")) != 0;
+    if (upd_auto) upd_net_init();
+    perf_log("UPDATE", "check %s (%s from %s)", upd_auto ? "on" : "off", update_asset(), UPD_REPO);
 
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_JOYSTICK) < 0) {
@@ -2010,6 +2143,7 @@ int main(int argc, char **argv)
     if (!is_pro) toast("NO STICKS HERE: KNOBS ONLY (OR A GAMEPAD)");
 
     audio_follow(1);
+    upd_next = SDL_GetTicks() + 5000;
 
     Uint32 last = SDL_GetTicks();
     while (running) {
@@ -2047,6 +2181,7 @@ int main(int argc, char **argv)
             }
         }
         repeats();
+        update_watch(t0);
         build_live(dt);
         publish(&live);
 
@@ -2094,5 +2229,5 @@ int main(int argc, char **argv)
     bi_switch_close();
     perf_close();
     SDL_Quit();
-    return 0;
+    return update_status()->state == UP_INSTALLED ? RELAUNCH_STATUS : 0; /* launch.sh starts the new version */
 }

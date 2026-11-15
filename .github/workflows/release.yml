@@ -32,6 +32,7 @@ jobs:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y libsdl2-dev
       - run: make test
+      - run: make update-test
 
   release:
     name: Build and publish
@@ -61,7 +62,7 @@ jobs:
           fi
           strings $b | grep -qx "$VERSION" || strings $b | grep -q "TrimFX $VERSION" || { echo "::error::the binary does not carry version $VERSION"; exit 1; }
           m=build/TrimFX-mustardos.muxapp
-          for f in trimfx launch.sh mux_launch.sh wake_screen.sh glyph/trimfx.svg presets/README.txt LICENSE.txt VERSION; do
+          for f in trimfx launch.sh mux_launch.sh wake_screen.sh glyph/trimfx.svg presets/README.txt LICENSE.txt cacert.pem LICENSE-mbedtls.txt VERSION; do
             unzip -l $m | grep -q "TrimFX/$f$" || { echo "::error::$m has no $f"; exit 1; }
           done
           [ "$(unzip -p $m TrimFX/VERSION)" = "$VERSION" ] || { echo "::error::the package's VERSION is not $VERSION"; exit 1; }
