@@ -43,6 +43,7 @@ struct Engine {
     atomic_int job[NMOD];  /* the algorithm to make ready, + 1 (0: none) */
     atomic_int ready[NMOD];/* the algorithm made ready, + 1 (0: not yet) */
     atomic_int quit;
+    unsigned audio_clears; /* algorithms made ready on the audio thread (after the first block): the tests check */
 };
 
 static const int ORDERS[NORDER][3] = {
@@ -176,6 +177,8 @@ static void *helper_main(void *arg)
     return NULL;
 }
 
+unsigned engine_audio_clears(const Engine *e) { return e->audio_clears; }
+
 int engine_set_async(Engine *e, int on)
 {
     if (!on || e->async) return 0;
@@ -263,6 +266,7 @@ static void slot_block(Engine *e, int m, const Patch *pt, float *l, float *r, in
             env1 = 0.f;
             if (!e->async) {
                 reset_module(e, m, want);
+                e->audio_clears++;
                 s->cur = want;
                 memcpy(s->ps, raw, sizeof s->ps);
             } else if (!s->clearing) {
