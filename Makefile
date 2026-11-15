@@ -18,7 +18,7 @@ SDL_INC  := third_party/SDL2-2.30.9-headers
 VERSION  ?= $(shell sed -n 's/^\#define TFX_VERSION "\([^"]*\)".*/\1/p' src/main.c)
 DSP      := src/engine.c src/tone.c src/modu.c src/delay.c src/verb.c src/bloom.c src/midiverb2.c src/master/master.c
 # lib/brickio: USB audio and MIDI for the TrimUI apps, shared (see lib/brickio/README.md)
-BRICKIO  := lib/brickio/usbaudio.c lib/brickio/aring.c lib/brickio/midi.c
+BRICKIO  := lib/brickio/usbaudio.c lib/brickio/aring.c lib/brickio/duplex.c lib/brickio/midi.c
 SRC      := src/main.c $(DSP) src/brick_input.c src/perflog.c src/ringleds.c src/gfx.c src/net.c src/update.c $(BRICKIO)
 HDR      := $(wildcard src/*.h src/master/*.h lib/brickio/*.h)
 CFLAGS   ?= -O2
@@ -56,7 +56,7 @@ all: build/trimui/$(APP)
 
 # the TrimUI build (TFX_TRIMUI: it checks GitHub for updates by default)
 build/trimui/$(APP): $(DEV_OBJ) build/sdl2/libSDL2-2.0.so.0 build/zig/libmbedtls.a
-	$(DEV_CC) -o $@ $(DEV_OBJ) build/zig/libmbedtls.a build/sdl2/libSDL2-2.0.so.0 -lm -lpthread -Wl,--allow-shlib-undefined -s
+	$(DEV_CC) -o $@ $(DEV_OBJ) build/zig/libmbedtls.a build/sdl2/libSDL2-2.0.so.0 -lm -lpthread -ldl -Wl,--allow-shlib-undefined -s
 
 build/trimui/%.o: %.c $(HDR) $(MBED_SRC)
 	@mkdir -p $(dir $@)
@@ -72,7 +72,7 @@ build/sdl2/libSDL2-2.0.so.0: tools/mksdlstub.py $(SRC)
 HOST_OBJ := $(patsubst %.c,build/desktop/%.o,$(SRC))
 desktop: build/desktop/$(APP)
 build/desktop/$(APP): $(HOST_OBJ) build/host/libmbedtls.a
-	$(HOST_CC) -o $@ $(HOST_OBJ) build/host/libmbedtls.a $(shell sdl2-config --libs) -lm -lpthread
+	$(HOST_CC) -o $@ $(HOST_OBJ) build/host/libmbedtls.a $(shell sdl2-config --libs) -lm -lpthread -ldl
 build/desktop/%.o: %.c $(HDR) $(MBED_SRC)
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(CFLAGS) $(shell sdl2-config --cflags | sed 's|-I\([^ ]*\)/SDL2|-I\1|') -I$(MBED_DIR)/include -c -o $@ $<
@@ -87,9 +87,13 @@ build/bench_engine: tests/test_engine.c $(DSP) $(HDR)
 build/test_aring: lib/brickio/tests/test_aring.c lib/brickio/aring.c lib/brickio/aring.h
 	@mkdir -p build
 	$(HOST_CC) -std=gnu11 -O1 -g -Wall -Wextra -fsanitize=address,undefined -o $@ lib/brickio/tests/test_aring.c lib/brickio/aring.c -lm
-test: build/test_engine build/test_aring
+build/test_duplex: lib/brickio/tests/test_duplex.c lib/brickio/duplex.c lib/brickio/duplex.h
+	@mkdir -p build
+	$(HOST_CC) -std=gnu11 -O1 -g -Wall -Wextra -fsanitize=address,undefined -o $@ lib/brickio/tests/test_duplex.c lib/brickio/duplex.c -ldl -lpthread
+test: build/test_engine build/test_aring build/test_duplex
 	build/test_engine
 	build/test_aring
+	build/test_duplex
 
 # the host updater: what the app does on A, from the command line (src/main_update.c)
 build/trimfx_update: src/net.c src/update.c src/main_update.c src/net.h src/update.h build/host/libmbedtls.a

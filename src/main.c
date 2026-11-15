@@ -215,7 +215,7 @@ enum { COL_TONE, COL_MOD, COL_DELAY, COL_VERB, COL_MASTER, NCOL };
 enum { R_ALGO, R_K1, R_K2, R_K3, R_K4, R_D1, R_D2, R_D3, R_D4, R_MIX, NPROW };
 enum { MR_IN, MR_OUT, MR_DRY, MR_TEMPO, MR_ORDER, MR_SLOT, MR_SETUP, MR_STICKS, NMROW };
 enum { OV_NONE, OV_SETUP, OV_STICKS, OV_DEEP };
-enum { SR_INPUT, SR_INPAIR, SR_OUTPUT, SR_OUTPAIR, SR_BUFFER, SR_SAVE, SR_LOAD, SR_FACTORY, SR_MIDI, SR_MIDIMAP, SR_UPDATE, SR_LOG, SR_INIT, NSROW };
+enum { SR_INPUT, SR_INPAIR, SR_OUTPUT, SR_OUTPAIR, SR_BUFFER, SR_LATENCY, SR_SAVE, SR_LOAD, SR_FACTORY, SR_MIDI, SR_MIDIMAP, SR_CLOCK, SR_UPDATE, SR_LOG, SR_INIT, NSROW };
 #define NXROW (3 + NAX * 2 * 2)
 static int col = COL_MOD, focus_mod = M_MOD;
 static int sel[NCOL] = {R_K1, R_K1, R_K1, R_K1, MR_IN};
@@ -423,6 +423,66 @@ static void learn_on(int on);
 static void midimap_default(void);
 static void midimap_path(char *out, int n);
 
+/* ---------------------------------------------------------------- MIDI clock
+ * FOLLOW (the default): an incoming clock sets the tempo. The tempo is taken over the last 4 beats
+ * (96 ticks), from the times the reader thread stamped them on arrival, so USB's jitter averages out
+ * and the delays don't wobble; it moves only by 0.2 BPM or more. A gap of 0.5 s starts it over.
+ * SEND: TrimFX's tempo goes out as clock (midi.c's own thread). OFF: neither. Kept in midiclock.txt */
+enum { CLK_FOLLOW, CLK_OFF, CLK_SEND, NCLK };
+static const char *const CLK_N[NCLK] = {"FOLLOW", "OFF", "SEND"};
+static int clock_mode = CLK_FOLLOW;
+#define CK_WIN 97
+static uint64_t ck_t[CK_WIN];
+static int ck_n, ck_w;
+static float ck_bpm; /* what the incoming clock says (0: none lately) */
+static Uint32 ck_seen;
+
+static void clock_path(char *out, int n) { snprintf(out, n, "%s/midiclock.txt", app_dir); }
+static void clock_save(void)
+{
+    char path[600];
+    clock_path(path, sizeof path);
+    FILE *f = fopen(path, "w");
+    if (f) fprintf(f, "clock=%s\n", CLK_N[clock_mode]), fclose(f);
+}
+static void clock_load(void)
+{
+    char path[600], line[64];
+    clock_path(path, sizeof path);
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    if (fgets(line, sizeof line, f))
+        for (int k = 0; k < NCLK; k++)
+            if (strstr(line, CLK_N[k])) clock_mode = k;
+    fclose(f);
+}
+static void clock_apply(void) { midi_clock_out(clock_mode == CLK_SEND ? base.bpm : 0.f); }
+
+static void clock_tick(uint64_t t)
+{
+    if (ck_n && t - ck_t[(ck_w + CK_WIN - 1) % CK_WIN] > 500000000ull) ck_n = 0; /* a gap: start over */
+    ck_t[ck_w] = t, ck_w = (ck_w + 1) % CK_WIN;
+    if (ck_n < CK_WIN) ck_n++;
+    ck_seen = SDL_GetTicks();
+    if (ck_n < 25) return; /* a beat at least */
+    uint64_t first = ck_t[(ck_w + CK_WIN - ck_n) % CK_WIN], last = ck_t[(ck_w + CK_WIN - 1) % CK_WIN];
+    if (last <= first) return;
+    float bpm = (float)(60e9 * (double)(ck_n - 1) / (24.0 * (double)(last - first)));
+    if (bpm < 40.f || bpm > 240.f) return;
+    int was = ck_bpm > 0.f;
+    ck_bpm = bpm;
+    if (clock_mode != CLK_FOLLOW) return;
+    float r = roundf(bpm * 10.f) / 10.f;
+    if (fabsf(r - base.bpm) >= 0.2f) {
+        base.bpm = r;
+        changed();
+        if (!was) {
+            perf_log("MIDI", "clock in: following it, %.1f BPM", r);
+            toast("MIDI CLOCK  %.1f BPM", r);
+        }
+    }
+}
+
 static void adjust(int dir, int big)
 {
     float step = big ? 0.05f : 0.01f;
@@ -435,6 +495,12 @@ static void adjust(int dir, int big)
         case SR_BUFFER: ua_cycle_buffer(dir); break;
         case SR_SAVE: case SR_LOAD: preset_slot = (preset_slot + dir + 16) % 16; break;
         case SR_FACTORY: factory_pick = (factory_pick + dir + NFACTORY) % NFACTORY; break;
+        case SR_CLOCK:
+            clock_mode = (clock_mode + dir + NCLK) % NCLK;
+            clock_save();
+            clock_apply();
+            perf_log("MIDI", "clock %s", CLK_N[clock_mode]);
+            break;
         case SR_LOG:
             perf_set_level((perf_level() + dir + 3) % 3);
             perf_log("LOG", "level %d", perf_level());
@@ -505,6 +571,7 @@ static void press_a(void)
 {
     if (overlay == OV_SETUP) {
         switch (ov_sel[OV_SETUP]) {
+        case SR_LATENCY: ua_latency_test(); toast("LATENCY TEST: A CABLE FROM OUTPUT TO INPUT"); return;
         case SR_SAVE: save_slot(preset_slot); break;
         case SR_LOAD: load_slot(preset_slot); break;
         case SR_FACTORY: {
@@ -580,7 +647,7 @@ static void log_input(void)
     perf_log("INPUT", "underruns +%u, skips +%u, output dropouts +%u, input clips +%u, output clips +%u | cushion %u frames (margin %u), "
                       "drift %+d ppm%s, latency ~%.0f ms, buffer %d%s, %s | %s",
              a.underruns - u0, a.skips - o0, a.dropouts - d0, a.in_clips - ic0, a.out_clips - oc0, a.cushion, a.margin, a.drift_ppm, a.exact ? " (one clock: bit-exact)" : "", a.latency_ms,
-             a.buffer, a.buffer_auto ? " AUTO" : "", a.direct_out ? "DIRECT" : "shared", *a.in_name ? a.in_name : "no input");
+             a.buffer, a.buffer_auto ? " AUTO" : "", a.duplex ? "DUPLEX" : a.direct_out ? "DIRECT" : "shared", *a.in_name ? a.in_name : "no input");
     u0 = a.underruns, o0 = a.skips, d0 = a.dropouts, ic0 = a.in_clips, oc0 = a.out_clips;
 
     /* LEVEL: how hot each stage ran since the last line, in dBFS (0 = full scale). Over 0 inside the
@@ -996,7 +1063,8 @@ static void learn_now(const MidiMap *t, char *o, int n)
 
 static void midi_event(const MidiEv *e)
 {
-    if (e->type != MIDI_CC && e->type != MIDI_NOTE) return; /* (the clock and the rest: not used here yet) */
+    if (e->type == MIDI_CLOCK) { clock_tick(e->t_ns); return; }
+    if (e->type != MIDI_CC && e->type != MIDI_NOTE) return; /* (start / stop and the rest: not used here) */
     int src = e->note, ch = e->ch, num = e->num & 127, val = e->val & 127;
     int rise = val >= 64 && mlast[src][ch][num] < 64;
     mlast[src][ch][num] = (unsigned char)val;
@@ -1728,7 +1796,7 @@ static void draw_deep(void)
 static void draw_overlay(void)
 {
     if (overlay == OV_DEEP) { draw_deep(); return; }
-    int x = 92, y = 70, w = 840, h = 620;
+    int x = 92, y = 40, w = 840, h = 680;
     gfx_fill_a(0, 0, W, H, 0x000000, 150);
     gfx_fill(x, y, w, h, C_BG);
     gfx_rect(x, y, w, h, 2, C_ACC);
@@ -1754,6 +1822,22 @@ static void draw_overlay(void)
             case SR_BUFFER:
                 snprintf(lab, sizeof lab, "BUFFER");
                 snprintf(v, sizeof v, "%s%d (%.1f MS)   LATENCY ~%.0f MS  < >", ast.buffer_auto ? "AUTO " : "", ast.buffer, ast.buffer / 48.f, ast.latency_ms);
+                break;
+            case SR_LATENCY: {
+                float ms = 0.f;
+                int lr = ua_latency_result(&ms);
+                snprintf(lab, sizeof lab, "LATENCY TEST");
+                if (lr == 1) snprintf(v, sizeof v, "MEASURING...");
+                else if (lr == 2) snprintf(v, sizeof v, "%.1f MS ROUND TRIP  AGAIN (A)", ms);
+                else if (lr < 0) snprintf(v, sizeof v, "NOTHING CAME BACK: CABLE?  (A)");
+                else snprintf(v, sizeof v, "CABLE OUT -> IN, THEN (A)");
+            } break;
+            case SR_CLOCK:
+                snprintf(lab, sizeof lab, "MIDI CLOCK");
+                if (clock_mode == CLK_FOLLOW && ck_bpm > 0.f && SDL_GetTicks() - ck_seen < 1000) snprintf(v, sizeof v, "FOLLOW: IN %.1f BPM  < >", ck_bpm);
+                else if (clock_mode == CLK_FOLLOW) snprintf(v, sizeof v, "FOLLOW: NONE COMING IN  < >");
+                else if (clock_mode == CLK_SEND) snprintf(v, sizeof v, "SEND %.0f BPM  < >", base.bpm);
+                else snprintf(v, sizeof v, "OFF  < >");
                 break;
             case SR_SAVE: snprintf(lab, sizeof lab, "SAVE TO SLOT"); snprintf(v, sizeof v, "%d  (A)", preset_slot + 1); break;
             case SR_LOAD: snprintf(lab, sizeof lab, "LOAD SLOT"); snprintf(v, sizeof v, "%d  (A)", preset_slot + 1); break;
@@ -1787,7 +1871,7 @@ static void draw_overlay(void)
         char l1[120], l2[120];
         snprintf(l1, sizeof l1, "HW  in: %s   out: %s", *ast.hw_in ? ast.hw_in : "-", *ast.hw_out ? ast.hw_out : "-");
         snprintf(l2, sizeof l2, "%s %s  %s  RT %s  drift %+d ppm  underruns %u  dropouts %u", TFX_VERSION, is_pro ? "Brick Pro" : "Brick",
-                 ast.direct_out ? "DIRECT" : "SHARED", ast.rt > 0 ? "on" : ast.rt < 0 ? "REFUSED" : "-", ast.drift_ppm, ast.underruns, ast.dropouts);
+                 ast.duplex ? "DUPLEX" : ast.direct_out ? "DIRECT" : "SHARED", ast.rt > 0 ? "on" : ast.rt < 0 ? "REFUSED" : "-", ast.drift_ppm, ast.underruns, ast.dropouts);
         fit(l1, w - 48);
         fit(l2, w - 48);
         gfx_text(x + 24, ry + NSROW * 33 + 10, l1, C_DIM, FONT_SMALL);
@@ -2112,6 +2196,7 @@ int main(int argc, char **argv)
         if (d && *d) snprintf(app_dir, sizeof app_dir, "%s", d);
     }
     perf_init("TFX", NULL); /* one build for the Brick and the Brick Pro */
+    ua_pin("TFX"); /* before any thread starts (the engine's helper, SDL's, MIDI's): they keep off the audio cores */
     perf_before_stat(log_input);
     if (env_int("TFX_MLOCK", 1) && mlockall(MCL_CURRENT | MCL_FUTURE) != 0) perf_log("START", "could not lock memory");
     const char *shot_path = getenv("TFX_SHOT");
@@ -2180,6 +2265,8 @@ int main(int argc, char **argv)
     midi_wake_type = SDL_RegisterEvents(1);
     if (midi_wake_type == (Uint32)-1) midi_wake_type = 0;
     midi_start(getenv("TFX_MIDI"), midi_wake);
+    clock_load();
+    clock_apply();
     upd_next = SDL_GetTicks() + 5000;
 
     Uint32 last = SDL_GetTicks(), last_frame = 0;
@@ -2215,6 +2302,30 @@ int main(int argc, char **argv)
             int notes = ua_tick();
             for (int bit = 1; bit <= UA_NOTE_REOPEN; bit <<= 1)
                 if (notes & bit) { char nb[96]; toast("%s", ua_note_text(bit, nb, sizeof nb)); }
+            /* MIDI clock: what goes out follows the tempo; an incoming one that stopped is let go */
+            static float ck_sent;
+            if (clock_mode == CLK_SEND && base.bpm != ck_sent) midi_clock_out(ck_sent = base.bpm);
+            if (clock_mode != CLK_SEND) ck_sent = 0.f;
+            if (ck_bpm > 0.f && SDL_GetTicks() - ck_seen > 1000) {
+                ck_bpm = 0.f, ck_n = 0;
+                if (clock_mode == CLK_FOLLOW) perf_log("MIDI", "clock in stopped: the tempo stays at %.1f BPM", base.bpm);
+            }
+            static int lt_was;
+            float lt_ms = 0.f;
+            int lt_now = ua_latency_result(&lt_ms);
+            if (lt_was == 1 && lt_now != 1) {
+                UaStatus lst;
+                ua_status(&lst);
+                if (lt_now == 2) {
+                    perf_log("LATENCY", "measured %.1f ms round trip (out, through the cable, in: the interface's converters and USB "
+                                        "included), buffer %d, %s", lt_ms, lst.buffer, lst.duplex ? "DUPLEX" : lst.direct_out ? "DIRECT" : "shared");
+                    toast("ROUND TRIP %.1f MS", lt_ms);
+                } else {
+                    perf_log("LATENCY", "nothing came back within 0.5 s: no cable from the output to the input?");
+                    toast("LATENCY TEST: NOTHING CAME BACK");
+                }
+            }
+            lt_was = lt_now;
             static int rt_logged;
             UaStatus ast;
             ua_status(&ast);

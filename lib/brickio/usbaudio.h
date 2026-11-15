@@ -40,6 +40,9 @@ typedef struct {
     void (*opened)(int frames, const char *device);
 } UaConfig;
 
+/* first thing, before SDL_Init: the audio threads get cores of their own, and every thread started
+ * from here on (SDL's own: its device watch, its video) keeps to the others. app: the settings prefix */
+void ua_pin(const char *app);
 /* after SDL_Init(SDL_INIT_AUDIO): opens the devices */
 void ua_start(const UaConfig *c);
 /* each SDL event (hot-plug) */
@@ -56,6 +59,11 @@ void ua_cycle_device(int capture, int dir); /* AUTO (USB first), then each devic
 void ua_cycle_pair(int capture, int dir);   /* channels 1-2, 3-4... of a multichannel interface */
 void ua_cycle_buffer(int dir);              /* AUTO, 64, 128, 256, 512, 1024, 2048 */
 
+/* the round trip, measured: needs a cable from the output to the input (the effects go quiet for
+ * about 2 s). ua_latency_result: 1 running, 2 done (ms set), -1 nothing came back, 0 not run */
+void ua_latency_test(void);
+int ua_latency_result(float *ms);
+
 typedef struct {
     char in_name[128], out_name[128]; /* what is open ("" = none) */
     int in_auto, out_auto;            /* chosen automatically */
@@ -63,6 +71,7 @@ typedef struct {
     int buffer, buffer_auto;          /* frames */
     int guard;                        /* the speaker is being kept silent */
     int direct_in, direct_out;        /* opened through plughw, not the shared path */
+    int duplex;                       /* one interface both ways, one thread, no cushion (duplex.c) */
     int have_input;
     int rt;                           /* the audio threads: 1 real-time, -1 refused, 0 not yet */
     char hw_in[64], hw_out[64];       /* "S24_3LE 48000 Hz 2 ch, period 1024" */

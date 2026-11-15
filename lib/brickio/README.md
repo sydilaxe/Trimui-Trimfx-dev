@@ -7,9 +7,11 @@ as it is. C on SDL2 and the kernel's ALSA files; nothing else to ship. GPL-3.0-o
 | File | What |
 |---|---|
 | `usbaudio.c/h` | the devices: picks the USB interface first, opens it direct, native channels, real-time threads, the buffer, the watchdog, the log |
+| `duplex.c/h` | full duplex on one USB interface: capture and playback through ALSA (libasound, loaded at run time), linked, one real-time thread, no cushion |
 | `aring.c/h` | the input's ring between the capture and playback callbacks: a cushion, clock drift followed by resampling, channel pairs |
 | `midi.c/h` | USB MIDI in (a reader thread, the app woken at once) and out |
 | `tests/test_aring.c` | the ring against jitter, bursts, drift (also two devices), stalls, multichannel and mono |
+| `tests/test_duplex.c` | duplex.c against ALSA's null device: opens, runs, stops, starts again (skipped without libasound) |
 
 ## What it does
 
@@ -33,8 +35,21 @@ as it is. C on SDL2 and the kernel's ALSA files; nothing else to ship. GPL-3.0-o
   own period if that is longer. It grows a step (to 2048) after 3 output dropouts in 20 s. The input
   cushion starts small and grows by 256 frames each time the input runs dry. After every calm 30 s it
   comes back down 16 frames. So the latency settles as low as each interface allows.
-- **Real-time.** The capture and playback threads take SCHED_FIFO priority on their first callback, so
-  the screen and the rest of the system can't keep them waiting.
+- **DUPLEX: one interface both ways.** When input and output are the same USB card, `duplex.c` opens its
+  capture and playback straight through ALSA, links them so they start together on the interface's one
+  clock, and runs one thread: read a period, process, write it. No cushion and no resampling: the round
+  trip is the input's period plus the 2 periods the output keeps queued (`<APP>_PERIODS=3` for 3), about
+  4 ms at 64 frames plus the interface. An xrun restarts both streams together (counted as a dropout).
+  An interface that can't run 48 kHz, or any failure, falls back to the two-stream path below.
+  `<APP>_DUPLEX=0` turns it off.
+- **Real-time, each on its own core.** The audio threads take SCHED_FIFO priority on their first
+  callback. `ua_pin()` (called first thing, before any thread starts) keeps the output thread (the
+  effects) on the last core, the input thread on the one before, and every other thread, SDL's
+  included, on the rest. The input runs above the output: it only copies, and must never miss a
+  period. `<APP>_PIN=0` turns the pinning off.
+- **Latency test.** `ua_latency_test()` measures the true round trip with a cable from the output to the
+  input: the effects go quiet, a click goes out, and the frames until it comes back are counted (five
+  times, the middle one kept). `ua_latency_result()` gives it.
 - **Watchdog.** A device that stops calling back for 1.5 s is opened again.
 - **Speaker guard** (optional, for FX sends). With no USB output, the internal speaker stays silent
   unless it is chosen.
@@ -44,14 +59,22 @@ as it is. C on SDL2 and the kernel's ALSA files; nothing else to ship. GPL-3.0-o
 - **MIDI.** A reader thread parses each message as it arrives: notes, CCs, program change, pitch bend,
   aftertouch, and the clock / start / stop / continue real-time messages. It queues them with their
   time and calls a wake function, so the app can act at once rather than at its next screen frame.
-  `midi_send` writes to every device that takes it (clock out). It works alongside USB audio on the
-  same port or hub.
+  `midi_send` writes to every device that takes it. `midi_clock_out(bpm)` sends the MIDI clock from a
+  thread of its own, on an absolute timetable (no drift), with start and stop. It works alongside USB
+  audio on the same port or hub.
 
 ## Latency
 
-The round trip, input to output, is roughly the capture period, plus the input cushion, plus two output
-periods, plus the interface's own converters (1-2 ms each way). With one interface both ways (DIRECT,
-one clock), the cushion is half an output buffer smaller.
+With one interface both ways (DUPLEX), the round trip is 3 periods plus the interface's own converters:
+
+| Buffer | Round trip, DUPLEX |
+|---|---|
+| 64 (1.3 ms) | **4 ms** + the interface |
+| 128 (2.7 ms) | **8 ms** + the interface |
+| 256 (5.3 ms) | **16 ms** + the interface |
+
+With two interfaces (or DUPLEX off), the round trip is roughly the capture period, plus the input
+cushion, plus two output periods, plus the interface's own converters (1-2 ms each way).
 
 | Buffer | Cushion, one interface (settled) | Round trip, about |
 |---|---|---|
@@ -73,8 +96,9 @@ that is about 0.3 %.
 ## Using it in an app
 
 1. Copy `lib/brickio/` into the app. Add its `.c` files to the build, `-Ilib/brickio` to the flags,
-   and `-lpthread` to the link.
-2. After `SDL_Init(SDL_INIT_AUDIO | ...)`:
+   and `-lpthread -ldl` to the link.
+2. First thing in `main`, before any thread starts: `ua_pin("MYAPP");`. Then, after
+   `SDL_Init(SDL_INIT_AUDIO | ...)`:
 
    ```c
    #include "usbaudio.h"
@@ -99,7 +123,7 @@ that is about 0.3 %.
 6. If the app updates itself, keep `audio.txt` among the user's files.
 
 Settings (env, `<APP>_` prefix): `_BUFFER` (64-2048, fixed), `_AUDIO` / `_INPUT` (part of a device's
-name, or `internal`), `_DIRECT=0`.
+name, or `internal`), `_DIRECT=0`, `_DUPLEX=0`, `_PERIODS=3`, `_PIN=0`.
 
 ## Tested
 

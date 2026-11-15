@@ -122,6 +122,11 @@ are a scene change away. Any controller can be mapped with **MIDI LEARN**: hold 
 control on the board (or press A for the footswitch, L3 / R3 for freeze...), move a MIDI one; on to
 the next, B when done. See [docs/midi.md](docs/midi.md).
 
+**MIDI clock** (SETUP > MIDI CLOCK): **FOLLOW** (the default) takes the tempo from a clock coming in (an
+OP-Z, a drum machine, a DAW), averaged over the last four beats so USB's jitter doesn't make the
+synced delays wobble. **SEND** sends TrimFX's tempo out as clock (with start and stop), steady from a
+thread of its own. **OFF** does neither. The choice is kept in `midiclock.txt`.
+
 ![The TRIMFX template](docs/midi-template.svg)
 
 ## The modules
@@ -350,12 +355,16 @@ means TrimFX's output is hitting full scale: turn MASTER > OUT down. The top bar
 - it runs 32-bit float, so a 24-bit / 48 kHz interface keeps its 24 bits;
 - it offers each channel pair of a multichannel interface;
 - input and output can be different interfaces. **One interface both ways is best for real-time
-  playing:** one clock, so the input is passed through bit for bit (no resampling), with a smaller
-  cushion that settles lower the longer it runs cleanly. The INPUT line then says "one clock:
-  bit-exact". About 6-9 ms through the effects at 64 frames, plus the interface's own converters;
+  playing: DUPLEX.** Its input and output run together on its one clock, from one thread: a period
+  in, the effects, the same period out. No cushion, no resampling (bit for bit). The round trip is
+  3 periods: about 4 ms at 64 frames, 8 ms at 128, plus the interface's own converters. The log says
+  DUPLEX on the INPUT line. `TFX_DUPLEX=0` in `launch.sh` turns it off; `TFX_PERIODS=3` keeps a
+  period more queued, for an interface that drops out at 2;
 - the output thread (the effects) and the input thread each keep to a core of their own, the input
   at the higher priority so it never misses a period (`TFX_PIN=0` in `launch.sh` turns this off);
-- the audio threads run at real-time priority, and a device that stops is reopened.
+- the audio threads run at real-time priority, and a device that stops is reopened;
+- **SETUP > LATENCY TEST** measures the true round trip: patch a cable from the interface's output to
+  its input and press A. The effects go quiet for about 2 s; the result shows in SETUP and the log.
 
 SETUP has the audio rows:
 - **INPUT / OUTPUT:** AUTO, or a device.

@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #include "aring.h"
+#include "duplex.h"
 
 #define RATE 48000
 #define MAXCH 8
@@ -46,6 +47,10 @@ static char hw_in[64], hw_out[64];
 static int matched_period; /* the buffer was matched to this interface's period (once a device) */
 static int direct_in, direct_out, direct_off; /* DIRECT in use; off (by setting, or it failed on this device) */
 static char direct_failed[128];
+/* DUPLEX: one USB interface both ways, run by duplex.c (no SDL streams, no cushion) */
+static int duplex_on, duplex_off, duplex_periods = 2;
+static char duplex_failed[48];                /* a card it failed on: the SDL path for it */
+static unsigned dx_seen_xruns;
 
 static void lg(const char *tag, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void lg(const char *tag, const char *fmt, ...)
@@ -84,10 +89,14 @@ static void go_realtime(atomic_int *flag, int prio, int core)
  * engine's helper) on the rest. One core for both audio threads made the input wait behind the
  * effects at small buffers: the capture side overran, and an interface whose playback follows its
  * capture (implicit feedback) slowed its output too */
-static void pin_cores(void)
+static char pin_note[160]; /* logged once the log is set up (ua_start) */
+void ua_pin(const char *app)
 {
+    static int done;
+    if (done) return;
+    done = 1;
     char envn[64];
-    snprintf(envn, sizeof envn, "%s_PIN", cfg.app);
+    snprintf(envn, sizeof envn, "%s_PIN", app);
     const char *e = getenv(envn);
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     if ((e && *e == '0') || n < 3) return;
@@ -96,8 +105,8 @@ static void pin_cores(void)
     for (int i = 0; i < n - 2; i++) CPU_SET(i, &set);
     if (pthread_setaffinity_np(pthread_self(), sizeof set, &set) != 0) return;
     out_core = (int)n - 1, in_core = (int)n - 2;
-    lg("AUDIO", "output thread on core %d, input thread on core %d, the rest on 0-%d (%s_PIN=0 turns this off)", out_core, in_core, in_core - 1,
-       cfg.app);
+    snprintf(pin_note, sizeof pin_note, "output thread on core %d, input thread on core %d, the rest on 0-%d (%s_PIN=0 turns this off)", out_core,
+             in_core, in_core - 1, app);
 }
 
 static void flush_denormals(void)
@@ -121,6 +130,89 @@ static void in_cb(void *ud, Uint8 *stream, int len)
     ar_push(&ring, (const float *)stream, len / (int)(sizeof(float) * (unsigned)ch), ch, atomic_load_explicit(&in_pair, memory_order_relaxed), now_ns());
 }
 
+/* ---------------------------------------------------------------- the latency test
+ * With a cable from the output to the input: the effects go quiet, the input's noise is measured
+ * (0.2 s), then a click goes out at the start of a buffer and the input is watched for it; the frames
+ * between the two are the true round trip, the interface's converters and USB included. Five times,
+ * the middle one kept. Audio thread only, but for lt_req (set by the main thread) and the results. */
+enum { LT_IDLE, LT_NOISE, LT_CLICK, LT_WAIT, LT_GAP };
+static atomic_int lt_req, lt_state, lt_result_us, lt_fail; /* result: microseconds, or -1 */
+static int lt_n, lt_count, lt_since;
+static float lt_noise;
+static int lt_got[5];
+
+static void lt_step(const float *in, float *out, int frames)
+{
+    if (atomic_exchange_explicit(&lt_req, 0, memory_order_acq_rel)) {
+        lt_n = 0, lt_since = 0, lt_noise = 0.f;
+        atomic_store(&lt_fail, 0), atomic_store(&lt_result_us, 0);
+        atomic_store(&lt_state, LT_NOISE);
+    }
+    int st = atomic_load_explicit(&lt_state, memory_order_relaxed);
+    if (st == LT_IDLE) return;
+    memset(out, 0, sizeof(float) * 2 * (size_t)frames); /* the effects are quiet throughout */
+    switch (st) {
+    case LT_NOISE: /* the input's own level, for the threshold */
+        for (int i = 0; i < 2 * frames; i++) lt_noise = fmaxf(lt_noise, fabsf(in[i]));
+        if ((lt_since += frames) >= RATE / 5) atomic_store(&lt_state, LT_CLICK);
+        break;
+    case LT_CLICK: /* a click (a two-sample pulse, both sides) at frame 0 */
+        out[0] = out[1] = 0.7f, out[2] = out[3] = -0.7f;
+        lt_count = frames; /* (an input frame i in the next buffer is frames + i after it) */
+        atomic_store(&lt_state, LT_WAIT);
+        break;
+    case LT_WAIT: {
+        float th = fmaxf(0.03f, 4.f * lt_noise);
+        lt_count += frames;
+        for (int i = 0; i < frames; i++)
+            if (fabsf(in[2 * i]) > th || fabsf(in[2 * i + 1]) > th) {
+                lt_got[lt_n++] = lt_count - frames + i; /* frames from the click going out to it coming in */
+                lt_since = 0;
+                atomic_store(&lt_state, LT_GAP);
+                break;
+            }
+        if (atomic_load(&lt_state) == LT_WAIT && lt_count > RATE / 2) { /* nothing back in 0.5 s: no cable */
+            atomic_store(&lt_fail, 1), atomic_store(&lt_result_us, -1);
+            atomic_store(&lt_state, LT_IDLE);
+        }
+    } break;
+    case LT_GAP: /* let it ring out, then the next; after five, the middle one */
+        if ((lt_since += frames) < RATE / 5) break;
+        if (lt_n < 5) { atomic_store(&lt_state, LT_CLICK); break; }
+        for (int a = 0; a < 5; a++)
+            for (int b = a + 1; b < 5; b++)
+                if (lt_got[b] < lt_got[a]) { int t = lt_got[a]; lt_got[a] = lt_got[b], lt_got[b] = t; }
+        atomic_store(&lt_result_us, (int)((long long)lt_got[2] * 1000000 / RATE));
+        atomic_store(&lt_state, LT_IDLE);
+        break;
+    }
+}
+
+void ua_latency_test(void) { atomic_store(&lt_req, 1); }
+int ua_latency_result(float *ms)
+{
+    if (atomic_load(&lt_req) || atomic_load(&lt_state) != LT_IDLE) return 1; /* running */
+    int us = atomic_load(&lt_result_us);
+    if (ms) *ms = us > 0 ? (float)us / 1000.f : 0.f;
+    return atomic_load(&lt_fail) ? -1 : us > 0 ? 2 : 0;
+}
+
+/* the effects' stereo into the device's channels (pair), clipped and counted; s is already zeroed */
+static void emit(const float *out, float *s, int frames, int ch, int pair)
+{
+    int g = atomic_load_explicit(&guard, memory_order_relaxed), clips = 0, a = pair * 2;
+    if (a + 1 >= ch) a = 0;
+    for (int i = 0; i < frames; i++) {
+        float l = out[2 * i], r = out[2 * i + 1];
+        if (l > 1.f || l < -1.f) clips++, l = l > 1.f ? 1.f : -1.f;
+        if (r > 1.f || r < -1.f) clips++, r = r > 1.f ? 1.f : -1.f;
+        if (g) l = r = 0.f;
+        if (ch == 1) s[i] = 0.5f * (l + r);
+        else s[i * ch + a] = l, s[i * ch + a + 1] = r;
+    }
+    if (clips) atomic_fetch_add_explicit(&out_clips, (unsigned)clips, memory_order_relaxed);
+}
+
 static void out_cb(void *ud, Uint8 *stream, int len)
 {
     (void)ud;
@@ -142,20 +234,38 @@ static void out_cb(void *ud, Uint8 *stream, int len)
     int on = live ? ar_pull(&ring, in, frames, atomic_load_explicit(&in_block, memory_order_relaxed), t) : 0;
     if (!live) memset(in, 0, sizeof(float) * 2 * (size_t)frames);
     cfg.process(in, out, frames, on, cfg.ud);
-
-    float *s = (float *)stream;
-    int g = atomic_load_explicit(&guard, memory_order_relaxed), clips = 0, a = pair * 2;
-    if (a + 1 >= ch) a = 0;
+    lt_step(in, out, frames);
     memset(stream, 0, (size_t)len);
+    emit(out, (float *)stream, frames, ch, pair);
+}
+
+/* DUPLEX, each period (duplex.c's thread): the input's pair straight in, the effects, out. No ring:
+ * the input is read the moment its period is in, sample for sample */
+static void dx_thread(void) { go_realtime(&rt_out, 80, out_core); atomic_store(&rt_in, atomic_load(&rt_out)); }
+static void dx_period(const float *cap, float *play, int frames, void *ud)
+{
+    (void)ud;
+    static int ftz;
+    static float in[MAXFR * 2], out[MAXFR * 2];
+    if (!ftz) flush_denormals(), ftz = 1;
+    if (frames > MAXFR) frames = MAXFR;
+    atomic_store_explicit(&last_call_ns, now_ns(), memory_order_relaxed);
+    atomic_fetch_add_explicit(&out_calls, 1, memory_order_relaxed);
+    int ch = atomic_load_explicit(&in_ch, memory_order_relaxed), a = atomic_load_explicit(&in_pair, memory_order_relaxed) * 2, b = a + 1, clips = 0;
+    if (b >= ch) a = 0, b = ch > 1 ? 1 : 0; /* a pair the interface hasn't: the first; mono: both */
     for (int i = 0; i < frames; i++) {
-        float l = out[2 * i], r = out[2 * i + 1];
-        if (l > 1.f || l < -1.f) clips++, l = l > 1.f ? 1.f : -1.f;
-        if (r > 1.f || r < -1.f) clips++, r = r > 1.f ? 1.f : -1.f;
-        if (g) l = r = 0.f;
-        if (ch == 1) s[i] = 0.5f * (l + r);
-        else s[i * ch + a] = l, s[i * ch + a + 1] = r;
+        float x = cap[i * ch + a], y = cap[i * ch + b];
+        if (x != x) x = 0.f;
+        if (y != y) y = 0.f;
+        if (fabsf(x) >= 0.9999f || fabsf(y) >= 0.9999f) clips++;
+        in[2 * i] = x, in[2 * i + 1] = y;
     }
-    if (clips) atomic_fetch_add_explicit(&out_clips, (unsigned)clips, memory_order_relaxed);
+    if (clips) atomic_fetch_add_explicit(&ring.clips, (unsigned)clips, memory_order_relaxed);
+    cfg.process(in, out, frames, 1, cfg.ud);
+    lt_step(in, out, frames);
+    int och = atomic_load_explicit(&out_ch, memory_order_relaxed);
+    memset(play, 0, sizeof(float) * (size_t)frames * (size_t)och);
+    emit(out, play, frames, och, atomic_load_explicit(&out_pair, memory_order_relaxed));
 }
 
 /* ---------------------------------------------------------------- the kernel's view */
@@ -401,8 +511,67 @@ static void buffer_for(const char *dev)
     buffer = buf_user ? buf_user : 256;
 }
 
+/* DUPLEX: input and output both on one USB card, on ALSA, not turned off or failed there */
+static int duplex_wanted(const char *o, const char *i)
+{
+    const char *drv = SDL_GetCurrentAudioDriver();
+    if (duplex_off || !o || !i || !drv || strcmp(drv, "alsa") || !is_usb(o)) return 0;
+    char ido[48], idi[48];
+    card_id(o, ido, sizeof ido);
+    card_id(i, idi, sizeof idi);
+    return *ido && !strcmp(ido, idi) && strcmp(ido, duplex_failed);
+}
+
+static int start_duplex(const char *o, const char *i)
+{
+    char keep_o[128], keep_i[128], id[48], rates[96], err[200];
+    snprintf(keep_o, sizeof keep_o, "%s", o), snprintf(keep_i, sizeof keep_i, "%s", i);
+    if (out_dev) SDL_CloseAudioDevice(out_dev), out_dev = 0; /* the card is one stream each way: SDL's go first */
+    if (in_dev) SDL_CloseAudioDevice(in_dev), in_dev = 0;
+    atomic_store_explicit(&have_in, 0, memory_order_release);
+    dx_stop();
+    duplex_on = 0;
+    card_id(keep_o, id, sizeof id);
+    int cho = native_channels(keep_o, 0, rates, sizeof rates), chi = native_channels(keep_i, 1, NULL, 0);
+    atomic_store(&out_ch, cho), atomic_store(&in_ch, chi);
+    atomic_store(&out_pair, out_pair_want * 2 + 1 < cho ? out_pair_want : 0);
+    atomic_store(&in_pair, in_pair_want * 2 + 1 < chi ? in_pair_want : 0);
+    atomic_store(&rt_out, 0), atomic_store(&rt_in, 0);
+    atomic_store(&hw_period_a, 0), atomic_store(&last_call_ns, 0);
+    if (atomic_load(&guard)) notes |= UA_NOTE_UNGUARD;
+    atomic_store(&guard, 0);
+    DxConfig c = {id, chi, cho, buffer, duplex_periods, dx_thread, dx_period, NULL, lg};
+    if (dx_start(&c, err, sizeof err) < 0) {
+        lg("AUDIO", "DUPLEX not possible on %s (%s): two streams instead", id, err);
+        snprintf(duplex_failed, sizeof duplex_failed, "%s", id);
+        return 0;
+    }
+    duplex_on = 1, direct_in = direct_out = 1;
+    snprintf(out_name, sizeof out_name, "%s", keep_o), snprintf(in_name, sizeof in_name, "%s", keep_i);
+    int fr = dx_frames();
+    atomic_store(&in_block, fr);
+    atomic_store_explicit(&have_in, 1, memory_order_release);
+    dx_seen_xruns = 0;
+    lg("AUDIO", "in + out: %s, %d / %d ch (pairs %d / %d), 48000 Hz, %d frames%s%s", keep_o, chi, cho, atomic_load(&in_pair) + 1,
+       atomic_load(&out_pair) + 1, fr, *rates ? ", rates " : "", rates);
+    hw_at = SDL_GetTicks() + 1200;
+    if (cfg.opened) cfg.opened(fr, keep_o);
+    last_out_check = SDL_GetTicks();
+    seen_out_calls = atomic_load(&out_calls);
+    return 1;
+}
+
 static void follow(int force)
 {
+    {
+        const char *o = pick(0), *i = pick(1);
+        if (duplex_wanted(o, i)) {
+            if (!force && duplex_on && dx_alive() && !strcmp(o, out_name) && !strcmp(i, in_name)) return; /* as it is */
+            if (!force && strcmp(o, out_name)) buffer_for(o), matched_period = 0;
+            if (start_duplex(o, i)) return;
+        }
+        if (duplex_on) dx_stop(), duplex_on = 0, out_name[0] = in_name[0] = 0, force = 1;
+    }
     const char *o = pick(0);
     int out_changes = force || !out_dev || strcmp(o ? o : "", out_name);
     if (out_changes && !force) buffer_for(o), matched_period = 0;
@@ -461,7 +630,8 @@ void ua_start(const UaConfig *c)
 {
     cfg = *c;
     ar_init(&ring);
-    pin_cores();
+    ua_pin(cfg.app); /* (if the app didn't before SDL_Init) */
+    if (*pin_note) lg("AUDIO", "%s", pin_note);
     load();
     char envn[64];
     snprintf(envn, sizeof envn, "%s_BUFFER", cfg.app);
@@ -472,6 +642,12 @@ void ua_start(const UaConfig *c)
     snprintf(envn, sizeof envn, "%s_DIRECT", cfg.app);
     e = getenv(envn);
     direct_off = e && *e == '0';
+    snprintf(envn, sizeof envn, "%s_DUPLEX", cfg.app);
+    e = getenv(envn);
+    duplex_off = e && *e == '0';
+    snprintf(envn, sizeof envn, "%s_PERIODS", cfg.app);
+    e = getenv(envn);
+    duplex_periods = e && atoi(e) >= 3 ? 3 : 2;
     buffer_for(pick(0)); /* AUTO starts low (256): it matches the interface's period, and grows if it must */
     started = 1;
     follow(1);
@@ -521,6 +697,24 @@ int ua_tick(void)
         int rto = atomic_load(&rt_out), rti = atomic_load(&rt_in);
         lg("AUDIO", "real-time priority: output %s, input %s", rto > 0 ? "on" : rto < 0 ? "REFUSED" : "-", rti > 0 ? "on" : rti < 0 ? "REFUSED" : "-");
     }
+    /* DUPLEX: its missed periods are dropouts; its thread ended (the device went, or failed) */
+    if (duplex_on) {
+        unsigned x = dx_xruns();
+        if (x != dx_seen_xruns) atomic_fetch_add(&dropouts, x - dx_seen_xruns), dx_seen_xruns = x;
+        if (!dx_alive()) {
+            char id[48];
+            card_id(out_name, id, sizeof id);
+            lg("AUDIO", "DUPLEX stopped on %s: two streams for it from now on", *id ? id : "the interface");
+            snprintf(duplex_failed, sizeof duplex_failed, "%s", id);
+            notes |= UA_NOTE_REOPEN;
+            reopen("DUPLEX stopped");
+            return (int)notes;
+        }
+        if (now - last_out_check > 1500) {
+            if (atomic_load(&out_calls) == seen_out_calls) { notes |= UA_NOTE_REOPEN; reopen("the interface stopped"); return (int)notes; }
+            seen_out_calls = atomic_load(&out_calls), last_out_check = now;
+        }
+    }
     /* the watchdog: a device that stopped calling back is opened again */
     if (out_dev && now - last_out_check > 1500) {
         unsigned c = atomic_load(&out_calls);
@@ -564,6 +758,7 @@ const char *ua_note_text(int note, char *b, int n)
 
 void ua_stop(void)
 {
+    dx_stop(), duplex_on = 0;
     if (out_dev) SDL_CloseAudioDevice(out_dev), out_dev = 0;
     if (in_dev) SDL_CloseAudioDevice(in_dev), in_dev = 0;
     started = 0;
@@ -623,15 +818,16 @@ void ua_cycle_buffer(int dir)
 void ua_status(UaStatus *s)
 {
     memset(s, 0, sizeof *s);
-    snprintf(s->in_name, sizeof s->in_name, "%s", in_dev ? (*in_name ? in_name : "DEFAULT") : "");
-    snprintf(s->out_name, sizeof s->out_name, "%s", out_dev ? (*out_name ? out_name : "DEFAULT") : "");
+    snprintf(s->in_name, sizeof s->in_name, "%s", in_dev || duplex_on ? (*in_name ? in_name : "DEFAULT") : "");
+    snprintf(s->out_name, sizeof s->out_name, "%s", out_dev || duplex_on ? (*out_name ? out_name : "DEFAULT") : "");
+    s->duplex = duplex_on;
     s->in_auto = !*in_want, s->out_auto = !*out_want;
     s->in_ch = atomic_load(&in_ch), s->out_ch = atomic_load(&out_ch);
     s->in_pair = atomic_load(&in_pair), s->out_pair = atomic_load(&out_pair);
     s->buffer = buffer, s->buffer_auto = !buf_user;
     s->guard = atomic_load(&guard);
-    s->direct_in = in_dev && direct_in, s->direct_out = out_dev && direct_out;
-    s->have_input = in_dev != 0;
+    s->direct_in = (in_dev || duplex_on) && direct_in, s->direct_out = (out_dev || duplex_on) && direct_out;
+    s->have_input = in_dev != 0 || duplex_on;
     int ro = atomic_load(&rt_out), ri = atomic_load(&rt_in);
     s->rt = ro < 0 || ri < 0 ? -1 : ro > 0 ? 1 : 0;
     snprintf(s->hw_in, sizeof s->hw_in, "%s", hw_in);
@@ -644,4 +840,9 @@ void ua_status(UaStatus *s)
     unsigned per = atomic_load(&hw_period_a);
     float outbuf = 2.f * (float)((int)per > buffer ? (int)per : buffer);
     s->latency_ms = (float)(s->cushion + outbuf) * 1000.f / RATE;
+    if (duplex_on) { /* a period in, what the output queues: no cushion */
+        int fr = dx_frames();
+        s->cushion = 0, s->margin = 0, s->drift_ppm = 0, s->exact = 1, s->slips = 0;
+        s->latency_ms = (float)fr * (float)(1 + duplex_periods) * 1000.f / RATE;
+    }
 }
