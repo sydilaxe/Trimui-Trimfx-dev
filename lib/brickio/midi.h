@@ -9,7 +9,8 @@
  *   - devices plugged in later are found (it looks every two seconds); ones pulled out are dropped
  *   - notes, CCs, program change, pitch bend, aftertouch, and the clock / start / stop /
  *     continue real-time messages (for tempo sync)
- *   - midi_send: bytes out to every device that takes them (clock out, for instance)
+ *   - midi_send: bytes out to every device that takes them
+ *   - midi_clock_out: the MIDI clock sent from a thread of its own, steady (absolute timetable)
  * Costs: a sleeping thread, woken only by MIDI and the two-second look for devices. */
 #pragma once
 #include <stdint.h>
@@ -32,6 +33,9 @@ int midi_start(const char *pattern, void (*wake)(void));
 int midi_poll(MidiEv *out, int max);
 /* bytes out to every open device that takes them; how many devices took them */
 int midi_send(const uint8_t *bytes, int n);
+/* clock out to every device: 24 a beat at bpm, from a thread of its own on an absolute timetable;
+ * start (FA) as it begins, stop (FC) at 0. A new bpm takes effect from the next tick */
+void midi_clock_out(float bpm);
 /* how many devices are open, and the first one's name ("" if none) */
 int midi_count(void);
 const char *midi_name(void);

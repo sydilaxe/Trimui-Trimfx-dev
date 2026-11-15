@@ -81,6 +81,9 @@ static void run(const Case *c)
     printf("%-34s underruns %u (settled %u), skips %u, clicks %d, drift followed %+.0f ppm, cushion %.1f ms (margin %u)%s\n", c->name,
            ring.underruns, under, skips, clicks, ppm, lat_ms, ring.margin, ring.exact ? ", exact" : "");
     if (c->locked) printf("    slips %u, resample %d\n", ring.slips, ring.resample);
+    /* one clock: still bit-exact at the end, whatever happened on the way (a stall is not drift) */
+    if (c->locked && c->ppm == 0) CHECK(ring.exact, "%s: still bit-exact", c->name);
+    if (c->locked && fabs(c->ppm) >= 300) CHECK(!ring.exact, "%s: follows the drift instead", c->name);
     CHECK(live > 0, "%s: sound came through", c->name);
     CHECK(clicks == 0, "%s: %d clicks", c->name, clicks);
     if (!c->stall_ms) {
@@ -139,6 +142,7 @@ int main(void)
         {"one interface, one clock, 128", 128, 128, 2, 0, 0, 0.5, 90, 0, 0, 30, 1},
         {"one interface, one clock, 64", 64, 64, 2, 0, 0, 0.5, 90, 0, 0, 30, 1},
         {"locked, but 400 ppm apart", 128, 128, 2, 0, 400, 0.5, 120, 0, 0, 60, 1},
+        {"one interface, one clock, a stall", 128, 128, 2, 0, 0, 0.5, 120, 20, 300, 30, 1},
     };
     for (unsigned i = 0; i < sizeof C / sizeof *C; i++) run(&C[i]);
     channels();

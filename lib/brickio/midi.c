@@ -8,6 +8,7 @@
 #include <glob.h>
 #include <poll.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -205,8 +206,68 @@ const char *midi_name(void)
     return name;
 }
 
+/* ---------------------------------------------------------------- clock out
+ * A thread of its own sends the 24-a-beat clock on an absolute timetable (each tick from the first,
+ * never from the last: no drift), at a real-time priority below the audio threads'. Start (FA) as it
+ * begins, stop (FC) as it ends. */
+static pthread_t ck_thr;
+static atomic_int ck_on;          /* the thread runs */
+static _Atomic float ck_bpm;      /* 0: stopped */
+static pthread_mutex_t ck_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t ck_cond = PTHREAD_COND_INITIALIZER;
+
+static void *clock_thread(void *arg)
+{
+    (void)arg;
+    struct sched_param sp = {.sched_priority = 60};
+    pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
+    int sending = 0;
+    uint64_t next = 0;
+    double bpm_was = 0.0;
+    while (atomic_load(&ck_on)) {
+        float bpm = atomic_load(&ck_bpm);
+        if (bpm <= 0.f) {
+            if (sending) { const uint8_t stop = 0xFC; midi_send(&stop, 1); sending = 0; }
+            pthread_mutex_lock(&ck_lock);
+            while (atomic_load(&ck_on) && atomic_load(&ck_bpm) <= 0.f) pthread_cond_wait(&ck_cond, &ck_lock);
+            pthread_mutex_unlock(&ck_lock);
+            continue;
+        }
+        if (!sending) { const uint8_t start = 0xFA; midi_send(&start, 1); sending = 1, next = now_ns(), bpm_was = bpm; }
+        if (bpm != bpm_was) bpm_was = bpm; /* a new tempo from the next tick on */
+        const uint8_t tick = 0xF8;
+        midi_send(&tick, 1);
+        next += (uint64_t)(60e9 / (bpm_was * 24.0));
+        struct timespec ts = {(time_t)(next / 1000000000ull), (long)(next % 1000000000ull)};
+        while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == EINTR) {}
+        uint64_t now = now_ns();
+        if (now > next + 100000000ull) next = now; /* held up badly (100 ms): carry on from now */
+    }
+    if (sending) { const uint8_t stop = 0xFC; midi_send(&stop, 1); }
+    return NULL;
+}
+
+void midi_clock_out(float bpm)
+{
+    if (bpm > 0.f && (bpm < 20.f || bpm > 300.f)) return;
+    atomic_store(&ck_bpm, bpm);
+    if (bpm > 0.f && !atomic_load(&ck_on)) {
+        atomic_store(&ck_on, 1);
+        if (pthread_create(&ck_thr, NULL, clock_thread, NULL) != 0) { atomic_store(&ck_on, 0); return; }
+    }
+    pthread_mutex_lock(&ck_lock);
+    pthread_cond_signal(&ck_cond);
+    pthread_mutex_unlock(&ck_lock);
+}
+
 void midi_stop(void)
 {
+    if (atomic_exchange(&ck_on, 0)) {
+        pthread_mutex_lock(&ck_lock);
+        pthread_cond_signal(&ck_cond);
+        pthread_mutex_unlock(&ck_lock);
+        pthread_join(ck_thr, NULL);
+    }
     if (atomic_exchange(&running, 0)) pthread_join(thr, NULL);
     pthread_mutex_lock(&lock);
     while (ndev) close(dev[ndev - 1].fd), ndev--;
