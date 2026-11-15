@@ -86,6 +86,8 @@ void engine_free(Engine *e);
 /* a helper thread makes new algorithms ready (clears their memory) off the audio thread; the
  * app turns it on, the tests leave it off (deterministic) */
 int engine_set_async(Engine *e, int on);
+/* how many algorithm changes cleared their memory on the audio thread (0 with the helper on) */
+unsigned engine_audio_clears(const Engine *e);
 void engine_reset(Engine *e);
 /* n frames of interleaved stereo in, out (may be the same) */
 void engine_process(Engine *e, const Patch *p, const float *in, float *out, int n);

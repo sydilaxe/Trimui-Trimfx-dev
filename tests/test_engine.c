@@ -186,14 +186,20 @@ int main(int argc, char **argv)
     }
 
     /* switching algorithms: inline (the tests' default) clears megabytes in one block; with the
-     * helper thread (as the app runs) the audio thread's worst block stays small, and the sound
-     * comes back after each change */
+     * helper thread (as the app runs) the audio thread spends next to nothing extra around a change,
+     * and the sound comes back after each change. Measured as the time the blocks around each change
+     * take beyond an ordinary block (the worst block alone mixes in ordinary processing peaks and the
+     * machine's noise) */
     {
-        double worst[2] = {1e9, 1e9};
+        double worst[2] = {1e9, 1e9}, extra[2] = {1e9, 1e9};
+        unsigned clears[2] = {0, 0};
         int back[2] = {0, 0}, finite[2] = {1, 1};
         for (int run = 0; run < 6; run++) { /* three runs each: the best of three, as this machine's scheduler adds noise */
             int mode = run & 1;
-            double w = 0;
+            double w = 0, ext = 0;
+            static double steady[1024];
+            int nsteady = 0, nswitch = 0, nwin[12] = {0};
+            double win[12] = {0};
             back[mode] = 0;
             Engine *ea = engine_new();
             if (mode) engine_set_async(ea, 1);
@@ -207,6 +213,7 @@ int main(int argc, char **argv)
             for (int b = 0; b < total_blocks; b++) {
                 if (b % 40 == 20) { /* every 213 ms a new algorithm on both */
                     back[mode] += heard;
+                    nswitch++;
                     p.m[M_DELAY].algo = (p.m[M_DELAY].algo + 1) % DL_N;
                     p.m[M_VERB].algo = (p.m[M_VERB].algo + 1) % RV_N;
                     since_switch = 0, heard = 0;
@@ -214,20 +221,34 @@ int main(int argc, char **argv)
                 double t0 = now();
                 engine_process(ea, &p, in + 2 * ((b * blk) % play), o, blk);
                 double dt = now() - t0;
+                if (since_switch < 12 && nswitch) win[since_switch] += dt, nwin[since_switch]++;
                 if (b > 2 && dt > w) w = dt;
                 since_switch++;
+                if (since_switch > 20 && nsteady < 1024) steady[nsteady++] = dt;
                 if (mode && since_switch < 12) usleep(5333); /* the blocks around a change at the real pace (5.3 ms each) */
                 for (int i = 0; i < 2 * blk; i++) if (fabsf(o[i]) > 1e-3f && since_switch > 3) heard = 1;
                 for (int i = 0; i < 2 * blk; i++) if (!isfinite(o[i])) finite[mode] = 0;
             }
+            clears[mode] = engine_audio_clears(ea);
             engine_free(ea);
+            /* an ordinary block: the median of the steady ones; the extra: what the blocks just after
+             * a change take beyond that, on average a change */
+            for (int i = 1; i < nsteady; i++)
+                for (int j = i; j > 0 && steady[j] < steady[j - 1]; j--) { double t = steady[j]; steady[j] = steady[j - 1]; steady[j - 1] = t; }
+            double ord = nsteady ? steady[nsteady / 2] : 0;
+            for (int k = 0; k < 12; k++)
+                if (nwin[k]) ext += fmax(0.0, win[k] / nwin[k] - ord);
             if (w < worst[mode]) worst[mode] = w;
+            if (ext < extra[mode]) extra[mode] = ext;
         }
-        printf("algorithm changes: worst block %.2f ms inline, %.2f ms with the helper thread; sound back after %d / %d changes\n",
-               worst[0] * 1e3, worst[1] * 1e3, back[1], back[0]);
+        printf("algorithm changes: %.2f ms extra in the audio thread per change inline, %.2f ms with the helper thread "
+               "(worst block %.2f / %.2f ms); sound back after %d / %d changes\n",
+               extra[0] * 1e3, extra[1] * 1e3, worst[0] * 1e3, worst[1] * 1e3, back[1], back[0]);
         CHECK(finite[0] && finite[1], "algorithm changes: finite output");
         CHECK(back[1] >= back[0] - 1 && back[1] > 0, "the sound comes back after a change as it does inline (%d / %d)", back[1], back[0]);
-        CHECK(worst[1] < worst[0] * 0.5, "the helper thread keeps the clearing out of the audio thread (%.2f vs %.2f ms)", worst[1] * 1e3, worst[0] * 1e3);
+        /* the property itself, exactly (the timings above are for reading: this machine's scheduler and
+         * the CPU idling between paced blocks make them too noisy to pass or fail on) */
+        CHECK(clears[1] == 0 && clears[0] > 0, "with the helper thread, no algorithm change clears on the audio thread (%u, inline %u)", clears[1], clears[0]);
     }
 
     /* full wet passes no dry: a delay at 100 % with a long time is silent at first */
