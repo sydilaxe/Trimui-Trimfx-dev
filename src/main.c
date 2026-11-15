@@ -582,6 +582,26 @@ static void log_input(void)
              a.underruns - u0, a.skips - o0, a.dropouts - d0, a.in_clips - ic0, a.out_clips - oc0, a.cushion, a.margin, a.drift_ppm, a.latency_ms,
              a.buffer, a.buffer_auto ? " AUTO" : "", a.direct_out ? "DIRECT" : "shared", *a.in_name ? a.in_name : "no input");
     u0 = a.underruns, o0 = a.skips, d0 = a.dropouts, ic0 = a.in_clips, oc0 = a.out_clips;
+
+    /* LEVEL: how hot each stage ran since the last line, in dBFS (0 = full scale). Over 0 inside the
+     * chain is no clip yet (the engine is float), but the safety limiter at the end cuts in at about
+     * -1 dBFS, and each cut can be heard as a click */
+    if (!eng) return;
+    EngLevels lv;
+    engine_levels(eng, &lv);
+    char mods[160] = "";
+    int ml = 0, hot = 0;
+    for (int m = 0; m < NMOD; m++) {
+        float db = 20.f * log10f(fmaxf(lv.mod_pk[m], 1e-5f));
+        ml += snprintf(mods + ml, sizeof mods - (size_t)ml, "%s %s %+.1f", m ? "," : "", eng_info(m)->name, db);
+        if (db > 0.f) hot = 1;
+    }
+    float in_db = 20.f * log10f(fmaxf(lv.in_pk, 1e-5f)), pre_db = 20.f * log10f(fmaxf(lv.pre_lim, 1e-5f));
+    perf_log("LEVEL", "in %+.1f dBFS%s |%s | into the limiter %+.1f dBFS%s", in_db, in_db > -0.5f ? " (at full scale: the interface's gain down)" : "", mods, pre_db,
+             lv.lim_hits ? "" : ", untouched");
+    if (lv.lim_hits)
+        perf_log("LIMIT", "the safety limiter cut in %u time%s, by up to %.1f dB: each can click. Turn MASTER > OUT%s down",
+                 lv.lim_hits, lv.lim_hits == 1 ? "" : "s", -20.f * log10f(lv.lim_min), hot ? " or the hot module's MIX / level" : "");
 }
 
 /* ---------------------------------------------------------------- self-update (update.h) */

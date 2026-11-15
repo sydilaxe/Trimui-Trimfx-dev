@@ -20,10 +20,13 @@ typedef struct {
     float gate;         /* DELAY / REVERB: their input, 1 open .. 0 closed (trails) */
     float mix;
     float ps[NPARAM];   /* the running algorithm's parameters, glided */
-    float pk;
+    float pk, lpk;      /* the output's peak: for the meters, for the log */
     int clearing;       /* the new algorithm is being made ready off the audio thread */
     float fz;           /* DELAY / REVERB: their input under FREEZE, 1 open .. 0 closed */
     int fz_on;          /* the module told to freeze: only once its input has faded out */
+    float held[NPARAM]; /* the raw values the module is given: a stepped choice waits here for a dip */
+    int held_for;       /* the algorithm held[] belongs to, + 1 */
+    float dip;          /* the wet's level around a stepped choice: 1 .. 0 */
     float inr;          /* the input into a new algorithm, 0 .. 1: its memory starts empty, so the sound
                          * going in fades in too (else its first echo starts on a hard edge: a click) */
 } Slot;
@@ -39,6 +42,8 @@ struct Engine {
     float in_g, out_g, dry;
     float lim;          /* the safety limiter's gain */
     float in_pk[2], out_pk[2];
+    float lg_in, lg_pre, lg_lim_min; /* the log's (engine_levels) */
+    unsigned lg_hits;
     int fresh;
     /* async: a helper thread makes a new algorithm ready (clears its delay memory, megabytes)
      * so the audio thread never does it inside one buffer */
@@ -55,6 +60,19 @@ static const int ORDERS[NORDER][3] = {
     {M_MOD, M_DELAY, M_VERB}, {M_MOD, M_VERB, M_DELAY}, {M_DELAY, M_MOD, M_VERB},
     {M_DELAY, M_VERB, M_MOD}, {M_VERB, M_MOD, M_DELAY}, {M_VERB, M_DELAY, M_MOD},
 };
+/* the stepped choices that rebuild part of an algorithm (how many heads, voices, stages, which
+ * pattern or mode): changed while sounding, the output jumps. The engine dips the wet for a few
+ * ms and makes the change while it is silent. {module, algorithm, parameter, steps} */
+static const struct { signed char m, a, k, n; } STEPPED[] = {
+    {M_TONE, TN_SAMPLER, 8, 3},
+    {M_MOD, MO_TRIPLE, 7, 5}, {M_MOD, MO_TRIPLE, 14, 3}, {M_MOD, MO_BARBER, 4, 4}, {M_MOD, MO_DRIFT, 2, 5},
+    {M_MOD, MO_TIDE, 10, 2}, {M_MOD, MO_STRINGS, 9, 3},
+    {M_DELAY, DL_RHYTHM, 2, 8}, {M_DELAY, DL_TAPE, 2, 7}, {M_DELAY, DL_STUTTER, 9, 4},
+    {M_VERB, RV_CHAMBER, 7, 4}, {M_VERB, RV_SPACE, 6, 4}, {M_VERB, RV_BLOOM, 7, 2}, {M_VERB, RV_MIDIVERB, 0, 2},
+    {M_VERB, RV_TEMPLE, 7, 8},
+};
+#define NSTEPPED (int)(sizeof STEPPED / sizeof STEPPED[0])
+
 static const char *const ORDER_N[NORDER] = {"MOD>DLY>VERB", "MOD>VERB>DLY", "DLY>MOD>VERB",
                                             "DLY>VERB>MOD", "VERB>MOD>DLY", "VERB>DLY>MOD"};
 
@@ -218,6 +236,7 @@ void engine_reset(Engine *e)
     memset(e->s, 0, sizeof e->s);
     memset(e->tdry, 0, sizeof e->tdry);
     e->lim = 1.f;
+    e->lg_lim_min = 1.f;
     e->fresh = 1;
 }
 
@@ -302,6 +321,19 @@ static void slot_block(Engine *e, int m, const Patch *pt, float *l, float *r, in
 
     const float *rawc = ms->p[s->cur];
     float k = 1.f - expf(-(float)n / (0.025f * sr));
+    /* the stepped choices: held until the wet has dipped out, then changed, then back in */
+    if (s->held_for != s->cur + 1) memcpy(s->held, rawc, sizeof s->held), s->held_for = s->cur + 1, s->dip = 1.f;
+    int restep = 0;
+    float stepped[NPARAM] = {0};
+    for (int j = 0; j < NSTEPPED; j++)
+        if (STEPPED[j].m == m && STEPPED[j].a == s->cur) {
+            stepped[(int)STEPPED[j].k] = 1.f;
+            if (pstep(s->held[(int)STEPPED[j].k], STEPPED[j].n) != pstep(rawc[(int)STEPPED[j].k], STEPPED[j].n)) restep = 1;
+        }
+    float dip0 = s->dip, dip1 = restep ? fmaxf(0.f, dip0 - (float)n / (0.008f * sr)) : fminf(1.f, dip0 + (float)n / (0.008f * sr));
+    for (int i = 0; i < NPARAM; i++)
+        if (!stepped[i] || !restep || dip0 <= 0.f) s->held[i] = rawc[i]; /* (a pending step waits for silence) */
+    s->dip = dip1;
     float mix0 = s->mix;
     s->mix += (ms->mix - s->mix) * k;
     float act0 = s->act, act1 = clampf(s->act + (ms->bypass ? -1.f : 1.f) * (float)n / (0.02f * sr), 0.f, 1.f);
@@ -371,7 +403,7 @@ static void slot_block(Engine *e, int m, const Patch *pt, float *l, float *r, in
             int c = n - o < PARAM_STEP ? n - o : PARAM_STEP;
             float kc = 1.f - expf(-(float)c / (0.025f * sr));
             for (int i = 0; i < NPARAM; i++) s->ps[i] += (rawc[i] - s->ps[i]) * kc;
-            run_module(e, m, s->cur, wl + o, wr + o, s->ps, rawc, pt, c);
+            run_module(e, m, s->cur, wl + o, wr + o, s->ps, s->held, pt, c);
         }
 
     float dg0, wg0, dg1, wg1, pk = 0.f;
@@ -379,7 +411,7 @@ static void slot_block(Engine *e, int m, const Patch *pt, float *l, float *r, in
     mix_gains(s->mix, &dg1, &wg1);
     for (int i = 0; i < n; i++) {
         float t = (float)i / (float)n;
-        float dg = dg0 + (dg1 - dg0) * t, wg = (wg0 + (wg1 - wg0) * t) * (env0 + (env1 - env0) * t);
+        float dg = dg0 + (dg1 - dg0) * t, wg = (wg0 + (wg1 - wg0) * t) * (env0 + (env1 - env0) * t) * (dip0 + (dip1 - dip0) * t);
         float a = act0 + (act1 - act0) * t;
         float ol, orr;
         if (trails) {
@@ -399,6 +431,7 @@ static void slot_block(Engine *e, int m, const Patch *pt, float *l, float *r, in
         if (q > pk) pk = q;
     }
     if (pk > s->pk) s->pk = pk;
+    if (pk > s->lpk) s->lpk = pk;
 }
 
 static void block(Engine *e, const Patch *p, const float *in, float *out, int n)
@@ -418,6 +451,7 @@ static void block(Engine *e, const Patch *p, const float *in, float *out, int n)
         float a = fabsf(il[i]), b = fabsf(ir[i]);
         if (a > e->in_pk[0]) e->in_pk[0] = a;
         if (b > e->in_pk[1]) e->in_pk[1] = b;
+        if (fmaxf(a, b) > e->lg_in) e->lg_in = fmaxf(a, b);
     }
     slot_block(e, M_TONE, p, l, r, n);
     int ord[3];
@@ -430,8 +464,13 @@ static void block(Engine *e, const Patch *p, const float *in, float *out, int n)
         float a = l[i] * og + il[i] * dg, b = r[i] * og + ir[i] * dg;
         /* the safety limiter: instant down to keep the peak near -1 dBFS, back up over ~0.3 s,
          * then a soft clip for what slips past */
-        float pk = fmaxf(fabsf(a), fabsf(b)) * e->lim;
-        if (pk > 0.89f) e->lim *= 0.89f / pk;
+        float raw_pk = fmaxf(fabsf(a), fabsf(b)), pk = raw_pk * e->lim;
+        if (raw_pk > e->lg_pre) e->lg_pre = raw_pk;
+        if (pk > 0.89f) {
+            if (e->lim > 0.999f) e->lg_hits++; /* a new cut, not one still recovering */
+            e->lim *= 0.89f / pk;
+            if (e->lim < e->lg_lim_min) e->lg_lim_min = e->lim;
+        }
         else e->lim += (1.f - e->lim) * 0.00007f;
         a = softclip(a * e->lim); b = softclip(b * e->lim);
         out[2 * i] = a; out[2 * i + 1] = b;
@@ -447,6 +486,15 @@ void engine_process(Engine *e, const Patch *p, const float *in, float *out, int 
         block(e, p, in, out, c);
         in += 2 * c; out += 2 * c; n -= c;
     }
+}
+
+void engine_levels(Engine *e, EngLevels *lv)
+{
+    lv->in_pk = e->lg_in, e->lg_in = 0.f;
+    for (int k = 0; k < NMOD; k++) lv->mod_pk[k] = e->s[k].lpk, e->s[k].lpk = 0.f;
+    lv->pre_lim = e->lg_pre, e->lg_pre = 0.f;
+    lv->lim_hits = e->lg_hits, e->lg_hits = 0;
+    lv->lim_min = e->lg_lim_min > 0.f ? e->lg_lim_min : 1.f, e->lg_lim_min = 1.f;
 }
 
 void engine_meters(Engine *e, EngMeters *m)

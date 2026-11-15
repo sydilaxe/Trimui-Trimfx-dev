@@ -100,3 +100,13 @@ typedef struct {
 } EngMeters;
 /* read (and reset) the meters: from the UI thread, lock-free (approximate) */
 void engine_meters(Engine *e, EngMeters *m);
+
+/* for the log: the levels since the last read (and reset), apart from the meters */
+typedef struct {
+    float in_pk;                   /* the input, linear (1 = full scale) */
+    float mod_pk[NMOD];            /* each module's output */
+    float pre_lim;                 /* what went into the safety limiter */
+    unsigned lim_hits;             /* times the limiter cut in (each one can be heard as a click) */
+    float lim_min;                 /* its deepest cut, linear gain */
+} EngLevels;
+void engine_levels(Engine *e, EngLevels *lv);
