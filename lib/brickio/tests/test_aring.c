@@ -20,6 +20,7 @@ typedef struct {
     const char *name;
     int in_block, out_block, src_ch, pair;
     double ppm, jitter_ms, secs, stall_at, stall_ms, settle;
+    int locked; /* one interface both ways: the smaller cushion */
 } Case;
 
 static ARing ring;
@@ -27,6 +28,7 @@ static ARing ring;
 static void run(const Case *c)
 {
     ar_init(&ring);
+    atomic_store(&ring.locked, c->locked);
     rs = 12345;
     const double SR = 48000.0, f = 440.0;
     double t_in = 0.0, t_out = urand() * c->out_block / SR;
@@ -130,6 +132,9 @@ int main(void)
         {"multichannel 8 in, pair 3-4", 512, 512, 8, 1, 50, 1.0, 100, 0, 0, 40},
         {"mono interface", 512, 512, 1, 0, -50, 1.0, 100, 0, 0, 40},
         {"a 300 ms stall at 20 s", 512, 512, 2, 0, 0, 1.0, 60, 20.0, 300, 0},
+        {"one interface, 256, smaller cushion", 256, 256, 2, 0, 20, 1.0, 90, 0, 0, 30, 1},
+        {"one interface, 128, smaller cushion", 128, 128, 2, 0, 20, 1.0, 90, 0, 0, 30, 1},
+        {"one interface, 64, smaller cushion", 64, 64, 2, 0, 20, 0.5, 90, 0, 0, 30, 1},
     };
     for (unsigned i = 0; i < sizeof C / sizeof *C; i++) run(&C[i]);
     channels();

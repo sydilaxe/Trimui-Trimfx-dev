@@ -61,7 +61,8 @@ int ar_pull(ARing *r, float *dst, int frames, int in_block, uint64_t now_ns)
     /* the smallest cushion that never runs dry when the capture side arrives in in_block bursts and
      * the reader takes frames at a time: on average half a burst and one and a half reads, plus the
      * margin (jitter) and a reserve to fade out over */
-    double target = 0.5 * in_block + 1.5 * frames + (double)margin + XF + 4.0;
+    double reads = atomic_load_explicit(&r->locked, memory_order_relaxed) ? 1.0 : 1.5;
+    double target = 0.5 * in_block + reads * frames + (double)margin + XF + 4.0;
     if (target > AR_FRAMES / 2) target = AR_FRAMES / 2;
     double fill = (double)w - r->pos;
     atomic_store_explicit(&r->fill, fill > 0 ? (unsigned)fill : 0u, memory_order_relaxed);

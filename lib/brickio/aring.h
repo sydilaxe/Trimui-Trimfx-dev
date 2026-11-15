@@ -38,6 +38,8 @@ typedef struct {
     atomic_uint underruns, skips, overflows, clips, fill, margin;
     atomic_int ppm;           /* the drift being followed, parts per million */
     double calm;              /* seconds since the last underrun (the reader's) */
+    atomic_int locked;        /* set by the owner: input and output are one interface (one clock, one
+                               * period): the cushion can be half an output buffer smaller */
 } ARing;
 
 void ar_init(ARing *r);

@@ -18,7 +18,8 @@
  *     to both sides
  *   - the audio threads at real-time priority (SCHED_FIFO)
  *   - the buffer: AUTO starts small (lowest latency), matches the interface's own period, and grows
- *     a step if the output keeps running dry; or a fixed size
+ *     a step if the output keeps running dry; or a fixed size, remembered for each interface
+ *   - one interface both ways (DIRECT): one clock, so a smaller input cushion
  *   - a watchdog: a device that stops calling back is opened again
  *   - optionally keeps the sound out of the internal speaker unless it is chosen (an FX send)
  *   - logs what the hardware really runs (format, rate, channels, period) and every decision
