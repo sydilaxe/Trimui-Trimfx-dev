@@ -83,6 +83,9 @@ const char *patch_factory(Patch *p, int i);
 typedef struct Engine Engine;
 Engine *engine_new(void);
 void engine_free(Engine *e);
+/* a helper thread makes new algorithms ready (clears their memory) off the audio thread; the
+ * app turns it on, the tests leave it off (deterministic) */
+int engine_set_async(Engine *e, int on);
 void engine_reset(Engine *e);
 /* n frames of interleaved stereo in, out (may be the same) */
 void engine_process(Engine *e, const Patch *p, const float *in, float *out, int n);

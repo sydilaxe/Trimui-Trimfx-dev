@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "engine.h"
 
+#include <pthread.h>
+#include <semaphore.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +20,7 @@ typedef struct {
     float mix;
     float ps[NPARAM];   /* the running algorithm's parameters, glided */
     float pk;
+    int clearing;       /* the new algorithm is being made ready off the audio thread */
 } Slot;
 
 struct Engine {
@@ -31,6 +35,14 @@ struct Engine {
     float lim;          /* the safety limiter's gain */
     float in_pk[2], out_pk[2];
     int fresh;
+    /* async: a helper thread makes a new algorithm ready (clears its delay memory, megabytes)
+     * so the audio thread never does it inside one buffer */
+    int async;
+    pthread_t helper;
+    sem_t wake;
+    atomic_int job[NMOD];  /* the algorithm to make ready, + 1 (0: none) */
+    atomic_int ready[NMOD];/* the algorithm made ready, + 1 (0: not yet) */
+    atomic_int quit;
 };
 
 static const int ORDERS[NORDER][3] = {
@@ -146,9 +158,42 @@ Engine *engine_new(void)
     return e;
 }
 
+static void reset_module(Engine *e, int m, int algo);
+
+static void *helper_main(void *arg)
+{
+    Engine *e = arg;
+    while (1) {
+        sem_wait(&e->wake);
+        if (atomic_load(&e->quit)) break;
+        for (int m = 0; m < NMOD; m++) {
+            int j = atomic_exchange_explicit(&e->job[m], 0, memory_order_acq_rel);
+            if (!j) continue;
+            reset_module(e, m, j - 1);
+            atomic_store_explicit(&e->ready[m], j, memory_order_release);
+        }
+    }
+    return NULL;
+}
+
+int engine_set_async(Engine *e, int on)
+{
+    if (!on || e->async) return 0;
+    if (sem_init(&e->wake, 0, 0) != 0) return -1;
+    if (pthread_create(&e->helper, NULL, helper_main, e) != 0) { sem_destroy(&e->wake); return -1; }
+    e->async = 1;
+    return 0;
+}
+
 void engine_free(Engine *e)
 {
     if (!e) return;
+    if (e->async) {
+        atomic_store(&e->quit, 1);
+        sem_post(&e->wake);
+        pthread_join(e->helper, NULL);
+        sem_destroy(&e->wake);
+    }
     tone_free(&e->tone);
     modu_free(&e->mo);
     delay_free(&e->dl);
@@ -212,13 +257,28 @@ static void slot_block(Engine *e, int m, const Patch *pt, float *l, float *r, in
     if (m == M_TONE && want < TN_CASSETTE && s->cur < TN_CASSETTE) {
         s->cur = want; /* between mastering chains SP-1 Master dips by itself */
         env1 = fminf(1.f, s->env + (float)n / (0.02f * sr));
-    } else if (want != s->cur) {
+    } else if (want != s->cur || s->clearing) {
         env1 = s->env - (float)n / (0.012f * sr);
         if (env1 <= 0.f) {
             env1 = 0.f;
-            reset_module(e, m, want);
-            s->cur = want;
-            memcpy(s->ps, raw, sizeof s->ps);
+            if (!e->async) {
+                reset_module(e, m, want);
+                s->cur = want;
+                memcpy(s->ps, raw, sizeof s->ps);
+            } else if (!s->clearing) {
+                /* silent now: hand the clearing to the helper, skip the module until it's done */
+                atomic_store_explicit(&e->ready[m], 0, memory_order_relaxed);
+                atomic_store_explicit(&e->job[m], want + 1, memory_order_release);
+                sem_post(&e->wake);
+                s->clearing = want + 1;
+            } else {
+                int r = atomic_load_explicit(&e->ready[m], memory_order_acquire);
+                if (r == s->clearing) {
+                    s->cur = r - 1;
+                    s->clearing = 0;
+                    memcpy(s->ps, ms->p[s->cur], sizeof s->ps);
+                }
+            }
         }
     } else
         env1 = fminf(1.f, s->env + (float)n / (0.02f * sr));
@@ -235,7 +295,7 @@ static void slot_block(Engine *e, int m, const Patch *pt, float *l, float *r, in
     s->gate = gate1;
 
     /* fully bypassed and nothing ringing: TONE and MOD need not run at all */
-    if (!trails && act0 == 0.f && act1 == 0.f) {
+    if (!trails && act0 == 0.f && act1 == 0.f && !s->clearing) {
         if (m == M_TONE) /* keep the dry line moving for when it comes back */
             for (int i = 0; i < n; i++) {
                 e->tdry[0][e->tdw] = l[i]; e->tdry[1][e->tdw] = r[i];
@@ -264,7 +324,11 @@ static void slot_block(Engine *e, int m, const Patch *pt, float *l, float *r, in
             float g = gate0 + (gate1 - gate0) * (float)i / (float)n;
             wl[i] *= g; wr[i] *= g;
         }
-    run_module(e, m, s->cur, wl, wr, s->ps, rawc, pt, n);
+    if (s->clearing) { /* the new algorithm is still being made ready: its wet is silent (env 0) */
+        memset(wl, 0, sizeof(float) * n);
+        memset(wr, 0, sizeof(float) * n);
+    } else
+        run_module(e, m, s->cur, wl, wr, s->ps, rawc, pt, n);
 
     float dg0, wg0, dg1, wg1, pk = 0.f;
     mix_gains(mix0, &dg0, &wg0);

@@ -2052,6 +2052,7 @@ int main(int argc, char **argv)
 
     eng = engine_new();
     if (!eng) { fprintf(stderr, "out of memory\n"); return 1; }
+    if (engine_set_async(eng, 1) != 0) perf_log("START", "no helper thread: algorithm changes clear their memory in the audio thread");
     patch_default(&base);
     matrix_default();
     {

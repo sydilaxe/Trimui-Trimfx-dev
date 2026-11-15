@@ -28,6 +28,9 @@ static char out_name[128], in_name[128];      /* open ("" = the default device) 
 static char out_want[128], in_want[128];      /* chosen in SETUP ("" = AUTO) */
 static int in_pair_want, out_pair_want;
 static int buf_user;                          /* 0 AUTO, else frames */
+#define NDEVBUF 8
+static struct { char id[48]; int frames; } devbuf[NDEVBUF]; /* a buffer chosen for one interface (by card id) */
+static int env_buffer;                        /* <app>_BUFFER: fixed for every interface */
 static int buffer = 256;                      /* frames, now */
 static atomic_int in_ch = 2, out_ch = 2, in_pair, out_pair, in_block = 256, have_in, guard;
 static atomic_int rt_out, rt_in;              /* 0 not yet, 1 on, -1 refused */
@@ -153,6 +156,18 @@ static int card_of(const char *dev, int *usb)
     return found;
 }
 
+/* the ALSA card id of a device (for remembering its buffer), "" if none */
+static void card_id(const char *dev, char *id, int n)
+{
+    int usb, card = card_of(dev, &usb);
+    id[0] = 0;
+    if (card < 0) return;
+    char p[64];
+    snprintf(p, sizeof p, "/proc/asound/card%d/id", card);
+    FILE *f = fopen(p, "r");
+    if (f) { if (fgets(id, n, f)) id[strcspn(id, "\r\n")] = 0; fclose(f); }
+}
+
 static int is_usb(const char *dev)
 {
     int usb;
@@ -216,6 +231,8 @@ static int read_hw(int card, int capture, char *out, int n, int *period)
     globfree(&g);
     return ok;
 }
+
+static int valid_buffer(int b) { return b == 64 || b == 128 || b == 256 || b == 512 || b == 1024 || b == 2048; }
 
 /* ---------------------------------------------------------------- choosing and opening */
 static const char *pick(int capture)
@@ -340,12 +357,34 @@ static void open_in(const char *name)
     SDL_PauseAudioDevice(in_dev, 0);
 }
 
+static int buf_global; /* the buffer for an interface with none of its own (audio.txt "buffer=") */
+
+/* the buffer for this output device: <app>_BUFFER, else the one chosen for this interface, else the
+ * general one (0 = AUTO) */
+static void buffer_for(const char *dev)
+{
+    if (env_buffer) { buf_user = env_buffer; buffer = buf_user; return; }
+    char id[48];
+    card_id(dev, id, sizeof id);
+    buf_user = buf_global;
+    for (int i = 0; i < NDEVBUF && *id; i++)
+        if (!strcmp(devbuf[i].id, id)) buf_user = valid_buffer(devbuf[i].frames) ? devbuf[i].frames : 0;
+    buffer = buf_user ? buf_user : 256;
+}
+
 static void follow(int force)
 {
     const char *o = pick(0);
-    if (force || !out_dev || strcmp(o ? o : "", out_name)) open_out(o), matched_period = force ? matched_period : 0;
+    int out_changes = force || !out_dev || strcmp(o ? o : "", out_name);
+    if (out_changes && !force) buffer_for(o), matched_period = 0;
+    if (out_changes) open_out(o);
     const char *i = pick(1);
-    if (force || !in_dev || strcmp(i ? i : "", in_name)) open_in(i);
+    if (force || out_changes || !in_dev || strcmp(i ? i : "", in_name)) open_in(i);
+    /* one interface both ways, DIRECT: one clock, one period: a smaller cushion */
+    char ido[48], idi[48];
+    card_id(out_name, ido, sizeof ido);
+    card_id(in_name, idi, sizeof idi);
+    atomic_store(&ring.locked, direct_in && direct_out && *ido && !strcmp(ido, idi));
     last_out_check = SDL_GetTicks();
     seen_out_calls = atomic_load(&out_calls);
 }
@@ -358,7 +397,9 @@ static void save(void)
     snprintf(tmp, sizeof tmp, "%s.tmp", cfg.settings);
     FILE *f = fopen(tmp, "w");
     if (!f) return;
-    fprintf(f, "in=%s\nout=%s\nin_pair=%d\nout_pair=%d\nbuffer=%d\n", in_want, out_want, in_pair_want, out_pair_want, buf_user);
+    fprintf(f, "in=%s\nout=%s\nin_pair=%d\nout_pair=%d\nbuffer=%d\n", in_want, out_want, in_pair_want, out_pair_want, buf_global);
+    for (int i = 0; i < NDEVBUF; i++)
+        if (devbuf[i].id[0]) fprintf(f, "buffer@%s=%d\n", devbuf[i].id, devbuf[i].frames);
     fclose(f);
     rename(tmp, cfg.settings);
 }
@@ -379,13 +420,14 @@ static void load(void)
         else if (!strcmp(line, "in_pair")) in_pair_want = atoi(v) & 3;
         else if (!strcmp(line, "out_pair")) out_pair_want = atoi(v) & 3;
         else if (!strcmp(line, "buffer")) buf_user = atoi(v);
+        else if (!strncmp(line, "buffer@", 7))
+            for (int i = 0; i < NDEVBUF; i++)
+                if (!devbuf[i].id[0]) { snprintf(devbuf[i].id, sizeof devbuf[i].id, "%s", line + 7), devbuf[i].frames = atoi(v); break; }
     }
     fclose(f);
 }
 
 /* ---------------------------------------------------------------- the app's side */
-static int valid_buffer(int b) { return b == 64 || b == 128 || b == 256 || b == 512 || b == 1024 || b == 2048; }
-
 void ua_start(const UaConfig *c)
 {
     cfg = *c;
@@ -394,12 +436,13 @@ void ua_start(const UaConfig *c)
     char envn[64];
     snprintf(envn, sizeof envn, "%s_BUFFER", cfg.app);
     const char *e = getenv(envn);
-    if (e && *e) buf_user = atoi(e);
     if (!valid_buffer(buf_user)) buf_user = 0;
+    buf_global = buf_user;
+    env_buffer = e && *e && valid_buffer(atoi(e)) ? atoi(e) : 0;
     snprintf(envn, sizeof envn, "%s_DIRECT", cfg.app);
     e = getenv(envn);
     direct_off = e && *e == '0';
-    buffer = buf_user ? buf_user : 256; /* AUTO starts low: it matches the interface's period, and grows if it must */
+    buffer_for(pick(0)); /* AUTO starts low (256): it matches the interface's period, and grows if it must */
     started = 1;
     follow(1);
 }
@@ -507,9 +550,9 @@ void ua_cycle_device(int capture, int dir)
     if (idx >= n) idx = -1;
     if (idx < 0) want[0] = 0;
     else snprintf(want, 128, "%s", SDL_GetAudioDeviceName(idx, capture));
-    if (capture) open_in(pick(1));
-    else open_out(pick(0)), matched_period = 0;
+    if (!capture) buffer_for(pick(0)), matched_period = 0; /* this interface's own buffer, if it has one */
     save();
+    follow(1); /* both directions again: the buffer, and whether they are one interface (the cushion) */
 }
 
 void ua_cycle_pair(int capture, int dir)
@@ -531,6 +574,18 @@ void ua_cycle_buffer(int dir)
     buf_user = B[k];
     buffer = buf_user ? buf_user : 256;
     matched_period = 0;
+    /* kept for this interface (by its card id), so each interface comes back with its own */
+    char id[48];
+    card_id(out_name, id, sizeof id);
+    if (*id) {
+        int slot = -1;
+        for (int i = 0; i < NDEVBUF; i++) if (!strcmp(devbuf[i].id, id)) slot = i;
+        for (int i = 0; i < NDEVBUF && slot < 0; i++) if (!devbuf[i].id[0]) slot = i;
+        if (slot < 0) slot = 0;
+        snprintf(devbuf[slot].id, sizeof devbuf[slot].id, "%s", id);
+        devbuf[slot].frames = buf_user;
+    } else
+        buf_global = buf_user;
     save();
     reopen(buf_user ? "the buffer was set" : "the buffer is AUTO");
 }

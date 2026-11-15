@@ -49,15 +49,23 @@ as it is. C on SDL2 and the kernel's ALSA files; nothing else to ship. GPL-3.0-o
 
 ## Latency
 
-Round trip, input to output, roughly: the capture period, the input cushion, and two output periods,
-plus the interface's own converters (1-2 ms each way).
+The round trip, input to output, is roughly the capture period, plus the input cushion, plus two output
+periods, plus the interface's own converters (1-2 ms each way). With one interface both ways (DIRECT,
+one clock), the cushion is half an output buffer smaller.
 
-| Buffer | Cushion (settled) | Output | Round trip, about |
-|---|---|---|---|
-| 128 (2.7 ms) | ~8 ms | 5.3 ms | **16-20 ms** |
-| 256 (5.3 ms), AUTO's start | ~13 ms | 10.7 ms | **30 ms** |
-| 512 (10.7 ms) | ~25 ms | 21 ms | **55 ms** |
-| 1024 (shared path, or a 1024-frame interface) | ~45 ms | 43 ms | **90 ms** |
+| Buffer | Cushion, one interface (settled) | Round trip, about |
+|---|---|---|
+| 64 (1.3 ms) | ~5.5 ms | **10 ms** |
+| 128 (2.7 ms) | ~7.6 ms | **16 ms** |
+| 256 (5.3 ms), AUTO's start | ~13 ms | **25-30 ms** (measured on a bluebox: ~25 ms) |
+| 512 (10.7 ms) | ~22 ms | **50 ms** |
+| 1024 (the shared path, or a 1024-frame interface) | ~40 ms | **85-90 ms** |
+
+How low an interface goes depends on the interface and the load. The 1010music bluebox ran cleanly at
+256 on a Brick Pro, and fell behind at 64.
+
+A BUFFER chosen in SETUP is kept for the interface it was chosen on, by its ALSA card id (in
+`audio.txt`), so each interface comes back with its own. `<APP>_BUFFER` overrides every interface.
 
 The ring's cost is about 0.03 % of a desktop core (60 s of audio in 21 ms). On the Brick's Cortex-A53
 that is about 0.3 %.

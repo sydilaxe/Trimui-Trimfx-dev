@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <time.h>
 
 #include "../src/engine.h"
@@ -182,6 +183,51 @@ int main(int argc, char **argv)
         int finite = 1;
         for (int i = 0; i < 2 * play; i++) if (!isfinite(out[i])) finite = 0;
         CHECK(finite && rms(out, play) > 0.003f, "factory %s: finite, sounding (rms %.4f)", nm, rms(out, play));
+    }
+
+    /* switching algorithms: inline (the tests' default) clears megabytes in one block; with the
+     * helper thread (as the app runs) the audio thread's worst block stays small, and the sound
+     * comes back after each change */
+    {
+        double worst[2] = {1e9, 1e9};
+        int back[2] = {0, 0}, finite[2] = {1, 1};
+        for (int run = 0; run < 6; run++) { /* three runs each: the best of three, as this machine's scheduler adds noise */
+            int mode = run & 1;
+            double w = 0;
+            back[mode] = 0;
+            Engine *ea = engine_new();
+            if (mode) engine_set_async(ea, 1);
+            Patch p;
+            patch_default(&p);
+            p.m[M_TONE].bypass = p.m[M_MOD].bypass = 1;
+            p.m[M_DELAY].mix = p.m[M_VERB].mix = 1.f;
+            int blk = 256, total_blocks = 3 * SR / blk;
+            float o[2 * 256];
+            int since_switch = 0, heard = 1;
+            for (int b = 0; b < total_blocks; b++) {
+                if (b % 40 == 20) { /* every 213 ms a new algorithm on both */
+                    back[mode] += heard;
+                    p.m[M_DELAY].algo = (p.m[M_DELAY].algo + 1) % DL_N;
+                    p.m[M_VERB].algo = (p.m[M_VERB].algo + 1) % RV_N;
+                    since_switch = 0, heard = 0;
+                }
+                double t0 = now();
+                engine_process(ea, &p, in + 2 * ((b * blk) % play), o, blk);
+                double dt = now() - t0;
+                if (b > 2 && dt > w) w = dt;
+                since_switch++;
+                if (mode && since_switch < 12) usleep(5333); /* the blocks around a change at the real pace (5.3 ms each) */
+                for (int i = 0; i < 2 * blk; i++) if (fabsf(o[i]) > 1e-3f && since_switch > 3) heard = 1;
+                for (int i = 0; i < 2 * blk; i++) if (!isfinite(o[i])) finite[mode] = 0;
+            }
+            engine_free(ea);
+            if (w < worst[mode]) worst[mode] = w;
+        }
+        printf("algorithm changes: worst block %.2f ms inline, %.2f ms with the helper thread; sound back after %d / %d changes\n",
+               worst[0] * 1e3, worst[1] * 1e3, back[1], back[0]);
+        CHECK(finite[0] && finite[1], "algorithm changes: finite output");
+        CHECK(back[1] >= back[0] - 1 && back[1] > 0, "the sound comes back after a change as it does inline (%d / %d)", back[1], back[0]);
+        CHECK(worst[1] < worst[0] * 0.5, "the helper thread keeps the clearing out of the audio thread (%.2f vs %.2f ms)", worst[1] * 1e3, worst[0] * 1e3);
     }
 
     /* full wet passes no dry: a delay at 100 % with a long time is silent at first */
