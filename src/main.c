@@ -18,6 +18,8 @@
 #include <errno.h>
 #include <glob.h>
 #include <math.h>
+#include <pthread.h>
+#include <sched.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -92,6 +94,17 @@ static atomic_uint jit_margin = 256; /* the cushion's safety margin: grows each 
 static atomic_int have_input;
 static atomic_int spk_guard; /* 1: the output fell back to the internal speaker without being asked: silent */
 
+/* the audio threads at real-time priority (SCHED_FIFO; TrimFX runs as root on MustardOS), so the
+ * screen and the rest of the system can't keep them waiting: a late callback is a crackle. Each of
+ * SDL's audio threads sets its own on its first callback; the main thread logs the outcome. */
+static atomic_int rt_out, rt_in; /* 0 not yet, 1 on, -1 refused */
+static void go_realtime(atomic_int *flag, int prio)
+{
+    if (atomic_load_explicit(flag, memory_order_relaxed)) return;
+    struct sched_param sp = {.sched_priority = prio};
+    atomic_store(flag, pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp) == 0 ? 1 : -1);
+}
+
 static void flush_denormals(void)
 {
 #if defined(__aarch64__)
@@ -107,6 +120,7 @@ static void flush_denormals(void)
 static void in_cb(void *ud, Uint8 *stream, int len)
 {
     (void)ud;
+    go_realtime(&rt_in, 78);
     /* 32-bit float: SDL converts from whatever the interface runs (16, 24 or 32 bits) without
      * cutting a 24-bit input down to 16 */
     const float *s = (const float *)stream;
@@ -135,6 +149,7 @@ static void out_cb(void *ud, Uint8 *stream, int len)
     static int have_p;
     static float in[4096 * 2], out[4096 * 2];
     if (!ftz) flush_denormals(), ftz = 1;
+    go_realtime(&rt_out, 80);
     float *s = (float *)stream;
     static int16_t s16[4096 * 2]; /* a 16-bit copy for the LEDs' meter and the log's click check */
     int frames = len / 8;
@@ -291,6 +306,10 @@ static void log_hw(void)
         FILE *fi = fopen(idp, "r");
         if (fi) { if (fgets(id, sizeof id, fi)) id[strcspn(id, "\r\n")] = 0; fclose(fi); }
         perf_log("HW", "card %d %s %s: %s, %s Hz, %s ch, period %s frames", card, id, dev, fmt, rate, ch, per);
+        int n = (int)strlen(dev);
+        if (card > 0 && n && dev[n - 1] == 'p' && atoi(per) > buffer)
+            perf_log("HINT", "the interface plays in %s-frame periods, more than the %d-frame buffer: if it crackles, try TFX_BUFFER=%s in launch.sh",
+                     per, buffer, per);
     }
     globfree(&g);
 }
@@ -301,6 +320,7 @@ static void audio_open_out(const char *name)
     snprintf(keep, sizeof keep, "%s", name ? name : "");
     name = *keep ? keep : NULL;
     if (out_dev) SDL_CloseAudioDevice(out_dev), out_dev = 0;
+    atomic_store(&rt_out, 0); /* a new device, a new thread: it sets its priority again */
     SDL_AudioSpec want = {0}, have;
     want.freq = rate;
     want.format = AUDIO_F32SYS;
@@ -328,6 +348,7 @@ static void audio_open_in(const char *name)
     snprintf(keep, sizeof keep, "%s", name ? name : "");
     name = *keep ? keep : NULL;
     if (in_dev) SDL_CloseAudioDevice(in_dev), in_dev = 0;
+    atomic_store(&rt_in, 0);
     atomic_store(&have_input, 0);
     SDL_AudioSpec want = {0}, have;
     want.freq = rate;
@@ -1599,13 +1620,22 @@ static void short_name(const char *s, char *o, int n)
     o[i] = 0;
 }
 
-static void pedal(int x, int m)
+/* pass 0: the box as it stands (drawn into the cache when something on it changes); pass 1: what
+ * moves with the sound (the level bar), every frame */
+static void pedal(int x, int m, int pass)
 {
     static const char *const CODE[NMOD] = {"TF0101", "TF0401", "TF0501", "TF0901"};
     const ModInfo *mi = eng_info(m);
     const ModState *ms = &base.m[m];
     int a = ms->algo, on = !ms->bypass, focused = col == m && !overlay, s = sel[m];
     int y = PED_Y;
+    if (pass) {
+        /* the level, a thin bar under the readout */
+        float t = clampf((lin2db(vu_mod[m] + 1e-9f) + 48.f) / 48.f, 0.f, 1.f);
+        gfx_fill(x + 30, y + 598, PED_W - 60, 3, 0x7a7c80);
+        gfx_fill(x + 30, y + 598, (int)((PED_W - 60) * t), 3, on ? 0x2f3135 : 0x8a8c90);
+        return;
+    }
     if (focused) gfx_rect(x - 4, y - 4, PED_W + 8, PED_H + 8, 3, ACCENT);
     char b[64], v[48];
 
@@ -1681,19 +1711,18 @@ static void pedal(int x, int m)
     stamp(x + 16, y + 694, CODE[m], 0, 2);
     if (m == M_DELAY || m == M_VERB) toggle(x + 58, y + 640, "F", frozen, 0); /* FREEZE: L3 / R3 */
     else if (!on) stamp(x + 18, y + 620, "BYPASS", 0, 1);
-    /* the level, a thin bar under the readout */
-    float t = clampf((lin2db(vu_mod[m] + 1e-9f) + 48.f) / 48.f, 0.f, 1.f);
-    gfx_fill(x + 30, y + 598, PED_W - 60, 3, 0x7a7c80);
-    gfx_fill(x + 30, y + 598, (int)((PED_W - 60) * t), 3, on ? 0x2f3135 : 0x8a8c90);
 }
 
-static void master_strip(int x, int w)
+/* pass 0: the strip as it stands (cached); pass 1: the meters and the joysticks, every frame */
+static void master_strip(int x, int w, int pass)
 {
     int focused = col == COL_MASTER && !overlay, y = PED_Y;
-    if (focused) gfx_rect(x - 4, y - 4, w + 8, PED_H + 8, 3, ACCENT);
-    stamp_c(x + w / 2, y + 8, "TRIMFX", 0, 4);
+    if (!pass) {
+        if (focused) gfx_rect(x - 4, y - 4, w + 8, PED_H + 8, 3, ACCENT);
+        stamp_c(x + w / 2, y + 8, "TRIMFX", 0, 4);
+    }
     /* the levels: input and output, left and right, with a peak hold and a clip light each */
-    {
+    if (pass) {
         static float hold[2][2];
         static Uint32 hold_t[2][2], clip_t[2];
         static unsigned ic_seen, oc_seen;
@@ -1723,7 +1752,7 @@ static void master_strip(int x, int w)
         }
     }
     int ry0 = y + 86;
-    for (int r = 0; r < NMROW; r++) {
+    for (int r = 0; r < NMROW && !pass; r++) {
         int ry = ry0 + r * 29, here = focused && sel[COL_MASTER] == r;
         char lab[24], v[48];
         switch (r) {
@@ -1743,6 +1772,8 @@ static void master_strip(int x, int w)
     /* the preset's name on tape, and the chain's order */
     int ny = ry0 + NMROW * 29 + 6;
     char nm[48];
+    int tyy = ny + 108;
+    if (!pass) {
     snprintf(nm, sizeof nm, "%s", eng_order_name(base.order));
     stamp_c(x + w / 2, ny, nm, 0, 0);
     snprintf(nm, sizeof nm, "%s", patch_name);
@@ -1752,16 +1783,16 @@ static void master_strip(int x, int w)
     text_c(x + w / 2, ny + 27, nm, 0xf2f2f2, FONT_SMALL);
     /* the two joysticks: where the sticks are, and what they move */
     /* the sticks' three toggles: M matrix, L latch, H hold (B, X, Y) */
-    int tyy = ny + 108;
     toggle(x + w / 2 - 50, tyy, "M", stick_matrix, 0);
     toggle(x + w / 2 + 6, tyy, "L", stick_latch, 0);
     toggle(x + w / 2 + 62, tyy, "H", hold_on, 0);
+    }
     float av[NAX];
     axes(av);
     int m = focus_mod, a = base.m[m].algo, sz = 88;
     for (int s = 0; s < 2; s++) {
         int cy = tyy + 54 + sz / 2 + s * (sz + 30);
-        joystick(x + w / 2, cy, sz, av[2 * s], av[2 * s + 1], stick_matrix ? 0x8a8c90 : AXCOL[2 * s], s);
+        if (pass) { joystick(x + w / 2, cy, sz, av[2 * s], av[2 * s + 1], stick_matrix ? 0x8a8c90 : AXCOL[2 * s], s); continue; }
         char lab[40];
         if (stick_matrix) snprintf(lab, sizeof lab, "%s MATRIX", s ? "R" : "L");
         else snprintf(lab, sizeof lab, "%.5s/%.5s", eng_info(m)->pname[a][2 * s], eng_info(m)->pname[a][2 * s + 1]);
@@ -2025,18 +2056,63 @@ static void draw_overlay(void)
     }
 }
 
+/* what a box shows, as a number: when it changes, the box is drawn again into the cache */
+static uint64_t hmix(uint64_t h, int64_t v) { return (h ^ (uint64_t)v) * 0x100000001b3ull; }
+static int64_t q(float v) { return (int64_t)lrintf(v * 2048.f); }
+static uint64_t box_hash(int k, int m)
+{
+    uint64_t h = 0xcbf29ce484222325ull;
+    h = hmix(h, k), h = hmix(h, m), h = hmix(h, col), h = hmix(h, overlay != 0), h = hmix(h, stick_matrix), h = hmix(h, focus_mod);
+    if (m >= 0) {
+        const ModState *ms = &base.m[m];
+        int a = ms->algo;
+        h = hmix(h, sel[m]), h = hmix(h, a), h = hmix(h, ms->bypass), h = hmix(h, q(ms->mix)), h = hmix(h, q(live.m[m].mix));
+        h = hmix(h, m == M_DELAY ? base.freeze_dly : m == M_VERB ? base.freeze_verb : 0);
+        for (int p = 0; p < NBOARD; p++) h = hmix(h, q(ms->p[a][p])), h = hmix(h, q(live.m[m].p[a][p]));
+        for (int ax = 0; ax < NAX; ax++)
+            for (int t = 0; t < 2; t++) h = hmix(h, matrix[ax][t].mod * 64 + matrix[ax][t].param), h = hmix(h, q(matrix[ax][t].depth));
+    } else {
+        h = hmix(h, sel[COL_MASTER]), h = hmix(h, q(base.in_db)), h = hmix(h, q(base.out_db)), h = hmix(h, q(base.dry)), h = hmix(h, q(base.bpm));
+        h = hmix(h, base.order), h = hmix(h, preset_slot), h = hmix(h, stick_latch), h = hmix(h, hold_on), h = hmix(h, base.m[focus_mod].algo);
+        for (const char *c = patch_name; *c; c++) h = hmix(h, *c);
+    }
+    return h | 1; /* never 0: 0 is "not drawn yet" */
+}
+
 static void draw(void)
 {
     if (!bg) make_bg();
     led_model();
-    if (bg) memcpy(surf->pixels, bg, sizeof(uint32_t) * W * H); /* the board and the bare boxes */
-    else gfx_clear(BOARD);
-    draw_top();
+    if (!bg) gfx_clear(BOARD);
     int ord[4] = {M_TONE, 0, 0, 0};
     eng_order(base.order, ord + 1);
     /* the boxes in signal order, then the master box */
-    for (int k = 0; k < 4; k++) pedal(PED_X(k), ord[k]);
-    master_strip(MST_X, MST_W);
+    /* the boxes are drawn into a cache, each again only when something on it has changed; what
+     * moves with the sound and the sticks is drawn over them every frame */
+    static uint32_t *cache;
+    static uint64_t drawn[5];
+    if (!cache && bg && (cache = malloc(sizeof(uint32_t) * W * H))) memcpy(cache, bg, sizeof(uint32_t) * W * H), memset(drawn, 0, sizeof drawn);
+    if (cache) {
+        gfx_target(cache);
+        for (int k = 0; k < 5; k++) {
+            uint64_t h = box_hash(k, k < 4 ? ord[k] : -1);
+            if (h == drawn[k]) continue;
+            drawn[k] = h;
+            int bx = (k < 4 ? PED_X(k) : MST_X) - 5, bw = (k < 4 ? PED_W : MST_W) + 10;
+            for (int yy = PED_Y - 6; yy < PED_Y + PED_H + 6 && yy < H; yy++)
+                memcpy(cache + yy * W + bx, bg + yy * W + bx, sizeof(uint32_t) * (size_t)(bx + bw <= W ? bw : W - bx));
+            if (k < 4) pedal(PED_X(k), ord[k], 0);
+            else master_strip(MST_X, MST_W, 0);
+        }
+        gfx_target((uint32_t *)surf->pixels);
+        memcpy(surf->pixels, cache, sizeof(uint32_t) * W * H);
+    } else {
+        for (int k = 0; k < 4; k++) pedal(PED_X(k), ord[k], 0);
+        master_strip(MST_X, MST_W, 0);
+    }
+    draw_top();
+    for (int k = 0; k < 4; k++) pedal(PED_X(k), ord[k], 1);
+    master_strip(MST_X, MST_W, 1);
     if (overlay) draw_overlay();
     if (midi_learn && (!overlay || overlay == OV_DEEP)) {
         MidiMap t = {0, 0, 0, 0, 0, 0};
@@ -2225,7 +2301,7 @@ int main(int argc, char **argv)
         const char *d = getenv("TFX_DIR");
         if (d && *d) snprintf(app_dir, sizeof app_dir, "%s", d);
     }
-    perf_init("TFX", "TrimFX " TFX_VERSION);
+    perf_init("TFX", NULL); /* one build for the Brick and the Brick Pro */
     perf_before_stat(log_input);
     if (env_int("TFX_MLOCK", 1) && mlockall(MCL_CURRENT | MCL_FUTURE) != 0) perf_log("START", "could not lock memory");
     buffer = env_int("TFX_BUFFER", 512);
@@ -2327,6 +2403,16 @@ int main(int argc, char **argv)
         repeats();
         update_watch(t0);
         if (hw_log_at && (Sint32)(t0 - hw_log_at) >= 0) hw_log_at = 0, log_hw();
+        {
+            static int rt_logged;
+            int ro = atomic_load(&rt_out), ri = atomic_load(&rt_in);
+            if (!rt_logged && ro) {
+                rt_logged = 1;
+                perf_audio_rt(ro > 0);
+                if (ro < 0) perf_log("AUDIO", "real-time priority refused: the screen can delay the sound (crackles under load)");
+                perf_log("AUDIO", "capture thread real-time: %s", ri > 0 ? "on" : ri < 0 ? "refused" : "not running");
+            }
+        }
         build_live(dt);
         publish(&live);
 
@@ -2358,7 +2444,7 @@ int main(int argc, char **argv)
         perf_frame((uint64_t)(SDL_GetTicks() - t0) * 1000);
         perf_tick();
         Uint32 spent = SDL_GetTicks() - t0;
-        if (spent < 16) SDL_Delay(16 - spent);
+        if (spent < 33) SDL_Delay(33 - spent); /* 30 fps: plenty for the board, and the processor stays free */
     }
 
     {
