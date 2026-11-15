@@ -11,6 +11,7 @@
 #include "modules.h"
 
 #define TONE_LAT 64 /* >= tone_latency() */
+#define PARAM_STEP 32 /* frames: how often the modules see the gliding parameters move */
 
 typedef struct {
     int cur;            /* the algorithm running */
@@ -21,6 +22,10 @@ typedef struct {
     float ps[NPARAM];   /* the running algorithm's parameters, glided */
     float pk;
     int clearing;       /* the new algorithm is being made ready off the audio thread */
+    float fz;           /* DELAY / REVERB: their input under FREEZE, 1 open .. 0 closed */
+    int fz_on;          /* the module told to freeze: only once its input has faded out */
+    float inr;          /* the input into a new algorithm, 0 .. 1: its memory starts empty, so the sound
+                         * going in fades in too (else its first echo starts on a hard edge: a click) */
 } Slot;
 
 struct Engine {
@@ -252,6 +257,9 @@ static void slot_block(Engine *e, int m, const Patch *pt, float *l, float *r, in
         s->env = 1.f;
         s->act = s->gate = ms->bypass ? 0.f : 1.f;
         s->mix = ms->mix;
+        s->inr = 1.f;
+        s->fz_on = m == M_DELAY ? pt->freeze_dly : m == M_VERB ? pt->freeze_verb : 0;
+        s->fz = s->fz_on ? 0.f : 1.f;
         memcpy(s->ps, raw, sizeof s->ps);
         reset_module(e, m, want);
     }
@@ -261,13 +269,16 @@ static void slot_block(Engine *e, int m, const Patch *pt, float *l, float *r, in
         s->cur = want; /* between mastering chains SP-1 Master dips by itself */
         env1 = fminf(1.f, s->env + (float)n / (0.02f * sr));
     } else if (want != s->cur || s->clearing) {
-        env1 = s->env - (float)n / (0.012f * sr);
-        if (env1 <= 0.f) {
+        /* the old algorithm fades all the way out first; the change itself comes on the next block,
+         * once it is silent (changing on the block that reaches 0 cut the fade's end off: a click) */
+        env1 = fmaxf(0.f, s->env - (float)n / (0.012f * sr));
+        if (env0 <= 0.f) {
             env1 = 0.f;
             if (!e->async) {
                 reset_module(e, m, want);
                 e->audio_clears++;
                 s->cur = want;
+                s->inr = 0.f;
                 memcpy(s->ps, raw, sizeof s->ps);
             } else if (!s->clearing) {
                 /* silent now: hand the clearing to the helper, skip the module until it's done */
@@ -280,6 +291,7 @@ static void slot_block(Engine *e, int m, const Patch *pt, float *l, float *r, in
                 if (r == s->clearing) {
                     s->cur = r - 1;
                     s->clearing = 0;
+                    s->inr = 0.f;
                     memcpy(s->ps, ms->p[s->cur], sizeof s->ps);
                 }
             }
@@ -290,7 +302,6 @@ static void slot_block(Engine *e, int m, const Patch *pt, float *l, float *r, in
 
     const float *rawc = ms->p[s->cur];
     float k = 1.f - expf(-(float)n / (0.025f * sr));
-    for (int i = 0; i < NPARAM; i++) s->ps[i] += (rawc[i] - s->ps[i]) * k;
     float mix0 = s->mix;
     s->mix += (ms->mix - s->mix) * k;
     float act0 = s->act, act1 = clampf(s->act + (ms->bypass ? -1.f : 1.f) * (float)n / (0.02f * sr), 0.f, 1.f);
@@ -300,11 +311,16 @@ static void slot_block(Engine *e, int m, const Patch *pt, float *l, float *r, in
 
     /* fully bypassed and nothing ringing: TONE and MOD need not run at all */
     if (!trails && act0 == 0.f && act1 == 0.f && !s->clearing) {
-        if (m == M_TONE) /* keep the dry line moving for when it comes back */
+        for (int i = 0; i < NPARAM; i++) s->ps[i] += (rawc[i] - s->ps[i]) * k;
+        if (m == M_TONE) { /* the dry, still as late as when TONE runs: a jump in time is a click */
+            int lat = tone_latency();
             for (int i = 0; i < n; i++) {
                 e->tdry[0][e->tdw] = l[i]; e->tdry[1][e->tdw] = r[i];
+                int rd = (e->tdw - lat + TONE_LAT) % TONE_LAT;
+                l[i] = e->tdry[0][rd]; r[i] = e->tdry[1][rd];
                 e->tdw = (e->tdw + 1) % TONE_LAT;
             }
+        }
         return;
     }
 
@@ -323,16 +339,40 @@ static void slot_block(Engine *e, int m, const Patch *pt, float *l, float *r, in
     }
     memcpy(wl, l, sizeof(float) * n);
     memcpy(wr, r, sizeof(float) * n);
-    if (trails)
+    /* FREEZE: the input fades out first, then the module holds what it has (closing it at once
+     * left a hard edge in the memory it then held, and repeated); thawing opens it again gently */
+    int fwant = m == M_DELAY ? pt->freeze_dly : m == M_VERB ? pt->freeze_verb : 0;
+    float fz0 = s->fz, fz1 = fwant ? fmaxf(0.f, fz0 - (float)n / (0.01f * sr)) : fminf(1.f, fz0 + (float)n / (0.01f * sr));
+    s->fz = fz1;
+    s->fz_on = fwant && fz0 <= 0.f;
+    Patch fq;
+    if (trails && s->fz_on != fwant) {
+        fq = *pt;
+        if (m == M_DELAY) fq.freeze_dly = s->fz_on;
+        else fq.freeze_verb = s->fz_on;
+        pt = &fq;
+    }
+    float inr0 = s->inr, inr1 = s->clearing ? 0.f : fminf(1.f, s->inr + (float)n / (0.01f * sr));
+    s->inr = inr1;
+    if (trails || inr0 < 1.f)
         for (int i = 0; i < n; i++) {
-            float g = gate0 + (gate1 - gate0) * (float)i / (float)n;
+            float t = (float)i / (float)n;
+            float g = (trails ? (gate0 + (gate1 - gate0) * t) * (fz0 + (fz1 - fz0) * t) : 1.f) * (inr0 + (inr1 - inr0) * t);
             wl[i] *= g; wr[i] *= g;
         }
     if (s->clearing) { /* the new algorithm is still being made ready: its wet is silent (env 0) */
+        for (int i = 0; i < NPARAM; i++) s->ps[i] += (rawc[i] - s->ps[i]) * k;
         memset(wl, 0, sizeof(float) * n);
         memset(wr, 0, sizeof(float) * n);
     } else
-        run_module(e, m, s->cur, wl, wr, s->ps, rawc, pt, n);
+        /* in short steps, the parameters gliding between them: a knob or a stick moved across a
+         * whole block at once steps a filter or a gain hard enough to be heard (zipper clicks) */
+        for (int o = 0; o < n; o += PARAM_STEP) {
+            int c = n - o < PARAM_STEP ? n - o : PARAM_STEP;
+            float kc = 1.f - expf(-(float)c / (0.025f * sr));
+            for (int i = 0; i < NPARAM; i++) s->ps[i] += (rawc[i] - s->ps[i]) * kc;
+            run_module(e, m, s->cur, wl + o, wr + o, s->ps, rawc, pt, c);
+        }
 
     float dg0, wg0, dg1, wg1, pk = 0.f;
     mix_gains(mix0, &dg0, &wg0);
