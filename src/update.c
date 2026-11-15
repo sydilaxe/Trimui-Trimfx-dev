@@ -463,8 +463,8 @@ static unsigned long rd32(const unsigned char *p)
 /* files the user owns: an update never writes them */
 static int keep_users(const char *rel)
 {
-    /* the whole state, the MIDI map, the log, the LEDs' saved settings, the preset slots */
-    return !strcmp(rel, "state.txt") || !strcmp(rel, "midimap.txt") || !strcmp(rel, "log.txt") ||
+    /* the whole state, the MIDI map, the log, the audio choices, the LEDs' saved settings, the preset slots */
+    return !strcmp(rel, "state.txt") || !strcmp(rel, "midimap.txt") || !strcmp(rel, "log.txt") || !strcmp(rel, "audio.txt") ||
            !strcmp(rel, "ringleds_saved.txt") || !strncmp(rel, "presets/slot", 12);
 }
 
