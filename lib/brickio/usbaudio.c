@@ -526,7 +526,8 @@ void ua_cycle_buffer(int dir)
     static const int B[7] = {0, 64, 128, 256, 512, 1024, 2048};
     int k = 0;
     for (int i = 0; i < 7; i++) if (B[i] == buf_user) k = i;
-    k = (k + dir + 7) % 7;
+    k += dir;
+    if (k < 0 || k > 6) return; /* the ends: AUTO and 2048 (no wrapping round from AUTO to 2048) */
     buf_user = B[k];
     buffer = buf_user ? buf_user : 256;
     matched_period = 0;

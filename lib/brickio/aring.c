@@ -50,11 +50,14 @@ int ar_pull(ARing *r, float *dst, int frames, int in_block, uint64_t now_ns)
 {
     unsigned w = atomic_load_explicit(&r->w, memory_order_acquire);
     if (atomic_exchange_explicit(&r->reset, 0, memory_order_acq_rel)) {
-        r->pos = (double)w, r->primed = 0, r->avg = 0.0, r->integ = 0.0, r->ratio = 1.0;
+        r->pos = (double)w, r->primed = 0, r->avg = 0.0, r->integ = 0.0, r->ratio = 1.0, r->calm = 0.0;
         atomic_store(&r->r, w);
+        atomic_store(&r->margin, 128); /* a new device or buffer: what was learnt about the old one doesn't apply */
     }
     unsigned margin = atomic_load_explicit(&r->margin, memory_order_relaxed);
     if (in_block < 64) in_block = 64;
+    /* running dry adds a step the size of a capture buffer (64-256 frames): small buffers, small steps */
+    unsigned step = in_block < 64 ? 64 : in_block > 256 ? 256 : (unsigned)in_block;
     /* the smallest cushion that never runs dry when the capture side arrives in in_block bursts and
      * the reader takes frames at a time: on average half a burst and one and a half reads, plus the
      * margin (jitter) and a reserve to fade out over */
@@ -78,7 +81,7 @@ int ar_pull(ARing *r, float *dst, int frames, int in_block, uint64_t now_ns)
         /* running dry: play out what there is (at least the fade's reserve, faded) and build a
          * bigger cushion */
         atomic_fetch_add(&r->underruns, 1);
-        if (margin < 4096) atomic_store(&r->margin, margin + 256);
+        if (margin < 4096) atomic_store(&r->margin, margin + step);
         r->calm = 0.0;
         int got = fill > 3.0 ? (int)(fill - 3.0) : 0;
         if (got > frames) got = frames;
@@ -107,7 +110,11 @@ int ar_pull(ARing *r, float *dst, int frames, int in_block, uint64_t now_ns)
      * with w = 2 pi / 40 s: it settles in under a minute, too slowly to be heard as pitch */
     double dt = (double)frames / 48000.0;
     r->calm += dt;
-    if (r->calm > 30.0 && margin > 64) { atomic_store(&r->margin, margin - 16); r->calm = 0.0; } /* calm: a little less latency, gently */
+    if (r->calm > 30.0 && margin > 64) { /* calm: a little less latency, gently (an eighth of the margin, at least 16) */
+        unsigned d = margin / 8 > 16 ? margin / 8 : 16;
+        atomic_store(&r->margin, margin - d > 64 && margin > d ? margin - d : 64);
+        r->calm = 0.0;
+    }
     /* the level as it would be with the input arriving smoothly: where the writer is by now, from
      * when it last wrote (at most a burst and a half on) */
     double since = (double)(int64_t)(now_ns - atomic_load_explicit(&r->w_time, memory_order_relaxed)) * 48e-6;
