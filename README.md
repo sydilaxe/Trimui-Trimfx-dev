@@ -12,9 +12,11 @@ USB in -> TONE -> MOD -> DELAY -> REVERB -> USB out
                                      reverse...)
 ```
 
+**Latest release:** [v0.3.1](../../releases/tag/v0.3.1) · [all releases](../../releases)
+
 ![The pedalboard: four pedals, the MASTER strip and the selected pedal's X/Y pads](docs/screen-board.png)
 
-**Status: 0.1.0 dev.** The engine is tested on the host (every algorithm, `make test`), and the
+**Status: in testing.** The engine is tested on the host (every algorithm, `make test`), and the
 app builds for MustardOS. It has **not yet run on Brick hardware.**
 
 - Every module has several **algorithms** (L2 / R2). Each algorithm has its own controls, and each
@@ -400,20 +402,25 @@ For releases to reach installed copies, keep three things the same:
 
 ## Releasing
 
-Tag a commit on `main` and push the tag:
+CI (`.github/workflows/build.yml`) builds the MustardOS package and runs the tests on every push.
+To publish a release, push a tag:
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.3.2
+git push origin v0.3.2
 ```
 
-`.github/workflows/release.yml` then runs the engine tests and builds the MustardOS package with
-that version compiled in. It checks the package (aarch64, glibc 2.28 or older, the files inside,
-the version) and publishes a GitHub release named **TrimFX 0.2.0** with `TrimFX-mustardos.muxapp`, its
-SHA-256 and notes generated from the merged pull requests. A tag with a suffix (`v0.2.0-beta1`)
-makes a pre-release. Without a tag, run **Actions > release > Run workflow** and type the tag.
-Running it again for the same tag replaces the files. `TFX_VERSION` in `src/main.c` is only the
-version of untagged builds.
+or run **Actions > build > Run workflow** with the tag in `release_tag`, or create a release on the
+website. The tag must look like `v1.2.3`. The release is built as that version (`make VERSION=1.2.3`),
+which the app compares with newer release tags, so there's no need to bump the source first. CI checks
+the package (aarch64, glibc 2.28 or older, the files inside, the version) and publishes a full release
+marked Latest (the updater reads GitHub's latest release, which skips pre-releases), with
+`TrimFX-mustardos.muxapp`, its SHA-256, and `.github/release-notes.md` as the notes. Running again for
+the same tag replaces the files.
+
+`TFX_VERSION` in `src/main.c` is only the version of untagged builds; keep it, and the **Latest
+release** line at the top, at the latest release so local builds don't offer an update to themselves
+(CI checks the two match).
 
 ## Credits and licence
 
