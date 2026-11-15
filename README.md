@@ -333,6 +333,23 @@ SDL2) and writes the `.muxapp`. `make test` runs the engine tests. Also:
 - `make shots` saves screenshots of every page.
 - `make wavs` writes a WAV of every algorithm on a test signal.
 
+## Releasing
+
+Tag a commit on `main` and push the tag:
+
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+`.github/workflows/release.yml` then runs the engine tests and builds the MustardOS package with
+that version compiled in. It checks the package (aarch64, glibc 2.28 or older, the files inside,
+the version) and publishes a GitHub release named **TrimFX 0.2.0** with `TrimFX-mustardos.muxapp`, its
+SHA-256 and notes generated from the merged pull requests. A tag with a suffix (`v0.2.0-beta1`)
+makes a pre-release. Without a tag, run **Actions > release > Run workflow** and type the tag.
+Running it again for the same tag replaces the files. `TFX_VERSION` in `src/main.c` is only the
+version of untagged builds.
+
 ## Credits and licence
 
 TrimFX is GPL-3.0-or-later (`LICENSE`). It builds on:
