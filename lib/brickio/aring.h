@@ -9,9 +9,10 @@
  *     devices). The reader follows the cushion's average level with a slow control loop and reads
  *     a hair faster or slower (to +-0.4 %, with cubic interpolation), so the cushion stays put
  *     with no skips and no clicks
- *   - running dry: what is left fades out, the cushion builds up again with a bigger margin
- *     (+256 frames each time, to 4096); after every 30 s with no trouble the margin comes back down
- *     16 frames (to 64), so the latency settles as low as the interface allows
+ *   - running dry: what is left fades out, the cushion builds up again with a bigger margin (a step
+ *     the size of a capture buffer, 64-256 frames, to 4096); after every 30 s with no trouble the
+ *     margin comes back down an eighth (to 64), so the latency settles as low as the interface
+ *     allows. A new device or buffer starts the margin again from 128
  *   - far too full (after a stall): skips back to the cushion with a crossfade
  *   - channels: the writer takes one pair from a multichannel interface (or both sides from a mono
  *     one) */
