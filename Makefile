@@ -17,11 +17,13 @@ NAME     := TrimFX
 SDL_INC  := third_party/SDL2-2.30.9-headers
 VERSION  ?= $(shell sed -n 's/^\#define TFX_VERSION "\([^"]*\)".*/\1/p' src/main.c)
 DSP      := src/engine.c src/tone.c src/modu.c src/delay.c src/verb.c src/bloom.c src/midiverb2.c src/master/master.c
-SRC      := src/main.c $(DSP) src/brick_input.c src/perflog.c src/ringleds.c src/gfx.c src/midi.c src/net.c src/update.c
-HDR      := $(wildcard src/*.h src/master/*.h)
+# lib/brickio: USB audio and MIDI for the TrimUI apps, shared (see lib/brickio/README.md)
+BRICKIO  := lib/brickio/usbaudio.c lib/brickio/aring.c lib/brickio/midi.c
+SRC      := src/main.c $(DSP) src/brick_input.c src/perflog.c src/ringleds.c src/gfx.c src/net.c src/update.c $(BRICKIO)
+HDR      := $(wildcard src/*.h src/master/*.h lib/brickio/*.h)
 CFLAGS   ?= -O2
 CFLAGS   += -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Wno-format-truncation \
-            -ffast-math -DTFX_VERSION='"$(VERSION)"'
+            -ffast-math -DTFX_VERSION='"$(VERSION)"' -Ilib/brickio
 HOST_CC  ?= cc
 .DEFAULT_GOAL := all
 
@@ -48,7 +50,7 @@ build/host/libmbedtls.a: $(MBED_SRC)
 	$(MAKE) -f tools/mbedtls.mk OUT=build/host MBED_DIR=$(MBED_DIR) CC="$(HOST_CC)" AR=ar MBED_CFLAGS=-O2
 
 DEV_CC   = $(ZIG) cc -target $(ZTARGET) -mcpu=$(CPU)
-DEV_OBJ  := $(patsubst src/%.c,build/trimui/%.o,$(SRC))
+DEV_OBJ  := $(patsubst %.c,build/trimui/%.o,$(SRC))
 
 all: build/trimui/$(APP)
 
@@ -56,7 +58,7 @@ all: build/trimui/$(APP)
 build/trimui/$(APP): $(DEV_OBJ) build/sdl2/libSDL2-2.0.so.0 build/zig/libmbedtls.a
 	$(DEV_CC) -o $@ $(DEV_OBJ) build/zig/libmbedtls.a build/sdl2/libSDL2-2.0.so.0 -lm -lpthread -Wl,--allow-shlib-undefined -s
 
-build/trimui/%.o: src/%.c $(HDR) $(MBED_SRC)
+build/trimui/%.o: %.c $(HDR) $(MBED_SRC)
 	@mkdir -p $(dir $@)
 	$(DEV_CC) $(CFLAGS) -DTFX_TRIMUI -I$(SDL_INC) -I$(MBED_DIR)/include -c -o $@ $<
 
@@ -67,11 +69,11 @@ build/sdl2/libSDL2-2.0.so.0: tools/mksdlstub.py $(SRC)
 	$(ZIG) cc -target $(ZTARGET) -shared -Wl,-soname,libSDL2-2.0.so.0 -o $@ build/sdl2/sdl2_stub.c
 
 # --- desktop
-HOST_OBJ := $(patsubst src/%.c,build/desktop/%.o,$(SRC))
+HOST_OBJ := $(patsubst %.c,build/desktop/%.o,$(SRC))
 desktop: build/desktop/$(APP)
 build/desktop/$(APP): $(HOST_OBJ) build/host/libmbedtls.a
 	$(HOST_CC) -o $@ $(HOST_OBJ) build/host/libmbedtls.a $(shell sdl2-config --libs) -lm -lpthread
-build/desktop/%.o: src/%.c $(HDR) $(MBED_SRC)
+build/desktop/%.o: %.c $(HDR) $(MBED_SRC)
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(CFLAGS) $(shell sdl2-config --cflags | sed 's|-I\([^ ]*\)/SDL2|-I\1|') -I$(MBED_DIR)/include -c -o $@ $<
 
@@ -82,8 +84,12 @@ build/test_engine: tests/test_engine.c $(DSP) $(HDR)
 build/bench_engine: tests/test_engine.c $(DSP) $(HDR)
 	@mkdir -p build
 	$(HOST_CC) -std=gnu11 -O2 -ffast-math -o $@ tests/test_engine.c $(DSP) -lm
-test: build/test_engine
+build/test_aring: lib/brickio/tests/test_aring.c lib/brickio/aring.c lib/brickio/aring.h
+	@mkdir -p build
+	$(HOST_CC) -std=gnu11 -O1 -g -Wall -Wextra -fsanitize=address,undefined -o $@ lib/brickio/tests/test_aring.c lib/brickio/aring.c -lm
+test: build/test_engine build/test_aring
 	build/test_engine
+	build/test_aring
 
 # the host updater: what the app does on A, from the command line (src/main_update.c)
 build/trimfx_update: src/net.c src/update.c src/main_update.c src/net.h src/update.h build/host/libmbedtls.a
@@ -105,7 +111,7 @@ build/$(NAME)-mustardos.muxapp: build/trimui/$(APP) $(shell find Apps/$(NAME) mu
 	mkdir -p build/mux/$(NAME)
 	cp -r Apps/$(NAME)/. build/mux/$(NAME)/
 	cp -r mustardos/. build/mux/$(NAME)/
-	rm -f build/mux/$(NAME)/state.txt build/mux/$(NAME)/log.txt build/mux/$(NAME)/midimap.txt build/mux/$(NAME)/presets/slot*.txt
+	rm -f build/mux/$(NAME)/state.txt build/mux/$(NAME)/log.txt build/mux/$(NAME)/midimap.txt build/mux/$(NAME)/audio.txt build/mux/$(NAME)/presets/slot*.txt
 	cp build/trimui/$(APP) build/mux/$(NAME)/$(APP)
 	cp LICENSE build/mux/$(NAME)/LICENSE.txt
 	cp src/master/LICENSE-SP1Master.txt build/mux/$(NAME)/

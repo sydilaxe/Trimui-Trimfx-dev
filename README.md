@@ -341,13 +341,27 @@ clip light means the interface's input itself is overloaded: turn its gain down.
 means TrimFX's output is hitting full scale: turn MASTER > OUT down. The top bar says
 **INPUT DROPOUT** for 3 s whenever the input ran dry or had to skip.
 
-**Audio format:** TrimFX takes and gives 32-bit float. SDL converts from whatever the interface and
-MustardOS's sound layer run (16, 24 or 32 bits), so a 24-bit interface's input isn't cut down to 16
-bits. The log shows the format the hardware actually runs at.
+**USB audio** is handled by `lib/brickio` (shared with the other TrimUI apps; see
+[lib/brickio/README.md](lib/brickio/README.md)). In short:
+- it picks the USB interface first and opens it **direct** (not through ALSA's shared path, whose
+  1024-frame periods add about 60 ms);
+- it runs 32-bit float, so a 24-bit / 48 kHz interface keeps its 24 bits;
+- it offers each channel pair of a multichannel interface;
+- input and output can be different interfaces;
+- the audio threads run at real-time priority, and a device that stops is reopened.
 
-**The input's cushion:** USB input and output callbacks don't arrive in step. TrimFX keeps a cushion of
-input in hand (a capture buffer, an output buffer and a margin). If the input still runs dry, the
-margin grows by 256 frames each time, up to 4096, so a jittery interface settles after a glitch or two.
+SETUP has the audio rows:
+- **INPUT / OUTPUT:** AUTO, or a device.
+- **IN / OUT CHANNELS:** the pair on a multichannel interface.
+- **BUFFER:** AUTO, or 64-2048 frames, with the round-trip latency estimated next to it. AUTO starts at
+  256 frames (about 30 ms round trip). It matches a longer period if the interface has one, and grows
+  a step if the output keeps running dry.
+
+The line under the rows shows the format the hardware runs, DIRECT or SHARED, real-time on or not,
+the clock drift being followed, and the counters.
+
+The top bar says **AUDIO DROPOUT** for 3 s whenever the input ran dry or skipped, or the output was
+late.
 
 **The log:** everything goes to `log.txt` in the app folder (`MUOS/application/TrimFX/log.txt` on
 the card). **SETUP > LOG** sets how much: BASIC writes a status line every 10 s, DETAIL every second
@@ -355,10 +369,10 @@ plus every button and MIDI message. `TFX_LOG=2` in `launch.sh` starts in DETAIL.
 
 | Line | What it says |
 |---|---|
-| `AUDIO` | the devices opened: the driver, the rate, the buffer |
+| `AUDIO` | the devices opened (DIRECT or shared), their channels and rates, the buffer, real-time priority, every reopen |
 | `HW` | what the hardware really runs at, from the kernel: the format (`S16_LE`, `S24_3LE`, `S32_LE`), rate, period |
 | `STAT` | the audio thread's load (avg / peak), **dropouts** (the output ran dry: a bigger `TFX_BUFFER` helps), the longest gap between callbacks |
-| `INPUT` | since the last line: input **underruns** and **skips** (the USB input's timing), **input clips**, **output clips**, the cushion and its margin |
+| `INPUT` | since the last line: input **underruns** and **skips** (the USB input's timing), **output dropouts**, **input clips**, **output clips**; the cushion, the drift followed, the latency, the buffer, DIRECT or shared |
 | `JUMP` | a click made inside TrimFX's own output |
 | `HINT` | what to change, when the log sees a problem |
 
