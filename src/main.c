@@ -42,7 +42,7 @@
 #include "ringleds.h"
 
 #ifndef TFX_VERSION
-#define TFX_VERSION "0.1.0"
+#define TFX_VERSION "0.3.1"
 #endif
 #define W SCREEN_W
 #define H SCREEN_H

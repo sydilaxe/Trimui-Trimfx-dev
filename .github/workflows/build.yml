@@ -2,9 +2,20 @@ name: build
 
 on:
   push:
-    branches: ['**']   # tags: release.yml
   pull_request:
+  release:
+    types: [published]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Publish a GitHub release with this tag (e.g. v0.4.0). Leave empty to just build."
+        required: false
+        default: ""
+
+# the release tag, when this run publishes one: a pushed v* tag, a release created on the
+# website, or a manual run with release_tag filled in (with or without the v)
+env:
+  RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name || ((startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/V')) && github.ref_name) || '' }}
 
 jobs:
   mustardos:
@@ -12,27 +23,54 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: The README shows the source's version
+        run: |
+          # README's "Latest release" line and the version in the source move together
+          v=$(make -s version)
+          grep -qF "**Latest release:** [v$v](../../releases/tag/v$v)" README.md ||
+            { echo "::error::README.md's Latest release line isn't v$v, the version in the source"; exit 1; }
       - name: Build
         run: |
           pip install ziglang==0.14.1
           for s in Apps/TrimFX/launch.sh mustardos/*.sh; do sh -n "$s"; done
-          make -j"$(nproc)" package
-          file build/trimui/trimfx | grep -q "ARM aarch64"
+          # a release is built as the tag's version (v0.3.0 -> 0.3.0), which the app compares
+          # with the latest release's tag to offer updates; otherwise TFX_VERSION in src/main.c
+          # (a tag typed as V0.5.0, 0.5.0 or with spaces around it is taken as v0.5.0)
+          if [ -n "$RELEASE_TAG" ]; then
+            v=$(printf '%s' "$RELEASE_TAG" | tr -d '[:space:]'); v=${v#[vV]}
+            echo "$v" | grep -Eqx '[0-9]+(\.[0-9]+)*' || { echo "::error::release tag $RELEASE_TAG isn't v<number>.<number>..."; exit 1; }
+          else
+            v=$(make -s version)
+          fi
+          echo "building version $v"
+          make -j"$(nproc)" package VERSION="$v"
+          b=build/trimui/trimfx
+          file $b | grep -q "ARM aarch64"
           # runs on the firmware's own SDL2, and needs nothing newer than glibc 2.28
-          readelf -d build/trimui/trimfx | grep -q "libSDL2-2.0.so.0"
-          if objdump -T build/trimui/trimfx | grep -o "GLIBC_[0-9.]*" | sort -uV | awk -F'[_.]' '$2 > 2 || ($2 == 2 && $3 > 28)' | grep .; then
+          readelf -d $b | grep -q "libSDL2-2.0.so.0"
+          if objdump -T $b | grep -o "GLIBC_[0-9.]*" | sort -uV | awk -F'[_.]' '$2 > 2 || ($2 == 2 && $3 > 28)' | grep .; then
             echo "::error::the binary needs a glibc newer than 2.28"; exit 1
           fi
           m=build/TrimFX-mustardos.muxapp
-          for f in trimfx launch.sh mux_launch.sh wake_screen.sh glyph/trimfx.svg presets/README.txt LICENSE.txt cacert.pem LICENSE-mbedtls.txt; do
+          ls -l $m
+          for f in trimfx launch.sh mux_launch.sh wake_screen.sh glyph/trimfx.svg presets/README.txt LICENSE.txt cacert.pem LICENSE-mbedtls.txt VERSION; do
             unzip -l $m | grep -q "TrimFX/$f$" || { echo "::error::$m has no $f"; exit 1; }
           done
+          # the version the package and binary carry, which the updater compares with the release
+          test "$(unzip -p $m TrimFX/VERSION)" = "$v" || { echo "::error::the package's VERSION isn't $v"; exit 1; }
+          strings $b | grep -qx "$v" || strings $b | grep -q "TrimFX $v" || { echo "::error::the binary doesn't carry version $v"; exit 1; }
+          unzip -p $m TrimFX/trimfx | cmp -s - $b
+          # MustardOS's Archive Manager refuses absolute and .. paths, and anything not a file or folder
+          # (a bare "! cmd" can't fail a step under set -e, hence the ifs)
           if unzip -Z1 $m | grep -Eq '^/|(^|/)\.\.(/|$)|\\'; then echo "::error::$m has unsafe paths"; exit 1; fi
           if unzip -Zl $m | grep -Eq '^[bclps]'; then echo "::error::$m has links or devices"; exit 1; fi
+          (cd build && sha256sum TrimFX-mustardos.muxapp > TrimFX-mustardos.muxapp.sha256)
       - uses: actions/upload-artifact@v4
         with:
           name: TrimFX-mustardos
-          path: build/TrimFX-mustardos.muxapp
+          path: |
+            build/TrimFX-mustardos.muxapp
+            build/TrimFX-mustardos.muxapp.sha256
 
   test:
     name: Engine tests + screenshots (host)
@@ -40,9 +78,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y libsdl2-dev
-      - name: Engine tests (ASan/UBSan)
+      - name: Engine and ring tests (ASan/UBSan)
         run: make test
-      - name: Self-update, end to end (a fake GitHub release)
+      - name: Self-update against a local fake GitHub
         run: make update-test
       - name: Screenshots and WAVs
         run: make -j"$(nproc)" shots wavs
@@ -53,3 +91,44 @@ jobs:
           path: |
             build/shots/
             build/wavs/
+
+  release:
+    name: Publish release
+    # runs for: a pushed v* (or V*) tag, a release created on the website, or a manual run with a tag filled in
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/V') || github.event_name == 'release' || inputs.release_tag != ''
+    needs: [mustardos, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: TrimFX-mustardos
+      - name: Check the package is the tag's version
+        run: |
+          # the mustardos job built it as the tag's version; a mismatch would make the app offer
+          # this update forever. A manual run's tag may leave out the v, or be typed V0.5.0.
+          v=$(printf '%s' "$RELEASE_TAG" | tr -d '[:space:]'); v=${v#[vV]}
+          TAG=v$v
+          # a release made on the website keeps its own tag; the package goes onto it
+          if [ "$GITHUB_EVENT_NAME" = release ]; then TAG=$RELEASE_TAG; fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          test "$(unzip -p TrimFX-mustardos.muxapp TrimFX/VERSION)" = "$v" ||
+            { echo "::error::TrimFX-mustardos.muxapp isn't version $v"; exit 1; }
+          sha256sum -c TrimFX-mustardos.muxapp.sha256
+      - name: Create the GitHub release with the MustardOS package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          files="TrimFX-mustardos.muxapp TrimFX-mustardos.muxapp.sha256"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" $files --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" $files \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "TrimFX $TAG" \
+              --notes-file .github/release-notes.md \
+              --latest
+          fi
