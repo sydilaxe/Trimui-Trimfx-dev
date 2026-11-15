@@ -636,6 +636,7 @@ void ua_status(UaStatus *s)
     s->dropouts = atomic_load(&dropouts), s->in_clips = atomic_load(&ring.clips), s->out_clips = atomic_load(&out_clips);
     s->reopens = reopens;
     s->cushion = atomic_load(&ring.fill), s->margin = atomic_load(&ring.margin), s->drift_ppm = atomic_load(&ring.ppm);
+    s->exact = atomic_load(&ring.exact) && in_dev, s->slips = atomic_load(&ring.slips);
     unsigned per = atomic_load(&hw_period_a);
     float outbuf = 2.f * (float)((int)per > buffer ? (int)per : buffer);
     s->latency_ms = (float)(s->cushion + outbuf) * 1000.f / RATE;

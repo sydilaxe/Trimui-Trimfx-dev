@@ -578,8 +578,8 @@ static void log_input(void)
     UaStatus a;
     ua_status(&a);
     perf_log("INPUT", "underruns +%u, skips +%u, output dropouts +%u, input clips +%u, output clips +%u | cushion %u frames (margin %u), "
-                      "drift %+d ppm, latency ~%.0f ms, buffer %d%s, %s | %s",
-             a.underruns - u0, a.skips - o0, a.dropouts - d0, a.in_clips - ic0, a.out_clips - oc0, a.cushion, a.margin, a.drift_ppm, a.latency_ms,
+                      "drift %+d ppm%s, latency ~%.0f ms, buffer %d%s, %s | %s",
+             a.underruns - u0, a.skips - o0, a.dropouts - d0, a.in_clips - ic0, a.out_clips - oc0, a.cushion, a.margin, a.drift_ppm, a.exact ? " (one clock: bit-exact)" : "", a.latency_ms,
              a.buffer, a.buffer_auto ? " AUTO" : "", a.direct_out ? "DIRECT" : "shared", *a.in_name ? a.in_name : "no input");
     u0 = a.underruns, o0 = a.skips, d0 = a.dropouts, ic0 = a.in_clips, oc0 = a.out_clips;
 
@@ -1944,6 +1944,9 @@ static SDL_Texture *tex;
 static int screen_reset, draw_fails;
 static Uint32 last_rebuild;
 
+static uint32_t *shown;   /* what the texture holds (upload_changed) */
+static int shown_all;     /* 0: the texture must be filled whole (new, or rebuilt) */
+
 static void make_screen(int renderer)
 {
     if (tex) SDL_DestroyTexture(tex), tex = NULL;
@@ -1954,6 +1957,7 @@ static void make_screen(int renderer)
     }
     tex = ren ? SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, W, H) : NULL;
     if (tex) SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_NONE);
+    shown_all = 0; /* a new texture: filled whole next time */
     last_rebuild = SDL_GetTicks();
 }
 
@@ -1972,6 +1976,44 @@ static void screen_wake(void)
     if (p > 0) waitpid(p, NULL, 0);
 }
 
+/* only the rows that changed since the last frame go to the screen, in bands: uploading the whole
+ * 3 MB frame 30 times a second cost the kernel ~23,000 page faults a second, and every one of them
+ * is time the audio threads can be kept waiting */
+#define BAND 16
+
+static int upload_changed(void)
+{
+    if (!shown) shown = malloc(sizeof(uint32_t) * W * H), shown_all = 0;
+    if (!shown || !shown_all) {
+        if (SDL_UpdateTexture(tex, NULL, surf->pixels, surf->pitch) < 0) return -1;
+        if (shown) {
+            for (int y = 0; y < H; y++) memcpy(shown + y * W, (Uint8 *)surf->pixels + y * surf->pitch, sizeof(uint32_t) * W);
+            shown_all = 1;
+        }
+        return 0;
+    }
+    int run0 = -1;
+    for (int b = 0; b <= H / BAND; b++) {
+        int changed = 0;
+        if (b < H / BAND)
+            for (int y = b * BAND; y < (b + 1) * BAND; y++) {
+                const uint32_t *row_ = (const uint32_t *)((const Uint8 *)surf->pixels + y * surf->pitch);
+                if (memcmp(row_, shown + y * W, sizeof(uint32_t) * W)) {
+                    changed = 1;
+                    break;
+                }
+            }
+        if (changed && run0 < 0) run0 = b;
+        if (!changed && run0 >= 0) { /* a run of changed bands: one upload */
+            SDL_Rect rc = {0, run0 * BAND, W, (b - run0) * BAND};
+            if (SDL_UpdateTexture(tex, &rc, (const Uint8 *)surf->pixels + rc.y * surf->pitch, surf->pitch) < 0) return -1;
+            for (int y = rc.y; y < rc.y + rc.h; y++) memcpy(shown + y * W, (const Uint8 *)surf->pixels + y * surf->pitch, sizeof(uint32_t) * W);
+            run0 = -1;
+        }
+    }
+    return 0;
+}
+
 static void present(void)
 {
     static int frames;
@@ -1980,7 +2022,7 @@ static void present(void)
         for (int x = 0; x < W; x++) row_[x] |= 0xFF000000u; /* opaque: MustardOS shows alpha */
     }
     if (screen_reset) make_screen(screen_reset == 2), screen_reset = 0;
-    int bad = !tex || SDL_UpdateTexture(tex, NULL, surf->pixels, surf->pitch) < 0;
+    int bad = !tex || upload_changed() < 0;
     if (ren) {
         SDL_RenderClear(ren);
         bad |= !tex || SDL_RenderCopy(ren, tex, NULL, NULL) < 0;

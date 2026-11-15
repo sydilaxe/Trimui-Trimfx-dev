@@ -51,6 +51,7 @@ int ar_pull(ARing *r, float *dst, int frames, int in_block, uint64_t now_ns)
     unsigned w = atomic_load_explicit(&r->w, memory_order_acquire);
     if (atomic_exchange_explicit(&r->reset, 0, memory_order_acq_rel)) {
         r->pos = (double)w, r->primed = 0, r->avg = 0.0, r->integ = 0.0, r->ratio = 1.0, r->calm = 0.0;
+        r->resample = 0, r->ex_t = 0.0, r->slipping = 0;
         atomic_store(&r->r, w);
         atomic_store(&r->margin, 128); /* a new device or buffer: what was learnt about the old one doesn't apply */
     }
@@ -111,9 +112,13 @@ int ar_pull(ARing *r, float *dst, int frames, int in_block, uint64_t now_ns)
      * with w = 2 pi / 40 s: it settles in under a minute, too slowly to be heard as pitch */
     double dt = (double)frames / 48000.0;
     r->calm += dt;
-    if (r->calm > 30.0 && margin > 64) { /* calm: a little less latency, gently (an eighth of the margin, at least 16) */
+    /* calm: a little less latency, gently (an eighth of the margin, at least 16). One interface both
+     * ways (one clock, one period) goes lower and sooner: to 32 frames, every 15 s */
+    int lk = atomic_load_explicit(&r->locked, memory_order_relaxed);
+    unsigned floor_m = lk ? 32u : 64u;
+    if (r->calm > (lk ? 15.0 : 30.0) && margin > floor_m) {
         unsigned d = margin / 8 > 16 ? margin / 8 : 16;
-        atomic_store(&r->margin, margin - d > 64 && margin > d ? margin - d : 64);
+        atomic_store(&r->margin, margin > d && margin - d > floor_m ? margin - d : floor_m);
         r->calm = 0.0;
     }
     /* the level as it would be with the input arriving smoothly: where the writer is by now, from
@@ -132,6 +137,34 @@ int ar_pull(ARing *r, float *dst, int frames, int in_block, uint64_t now_ns)
     double dev = KP * err + KI * r->integ;
     if (dev > MAX_DEV) dev = MAX_DEV;
     if (dev < -MAX_DEV) dev = -MAX_DEV;
+    /* one interface both ways: one clock, nothing to follow. Read sample for sample (the cubic at a
+     * whole frame is that frame exactly); a level that creeps past 8-24 frames slips back in one go */
+    int exact = atomic_load_explicit(&r->locked, memory_order_relaxed) && !r->resample;
+    atomic_store_explicit(&r->exact, exact, memory_order_relaxed);
+    if (exact) {
+        dev = 0.0;
+        r->integ = 0.0;
+        r->pos = floor(r->pos + 0.5);
+        /* measured from 5 s in (the level has settled): the slips' net, less what the target moved
+         * by itself (the margin), is the drift; past 100 ppm the clocks really differ */
+        r->ex_t += dt;
+        if (r->ex_t < 5.0) r->ex_net = 0.0, r->ex_tgt0 = target;
+        /* past the level's own wobble, it slips back in steps of at most 4 frames a buffer, each
+         * crossfaded (a 4-frame step can't be heard), until it is within 2 frames again */
+        if (fabs(err) > 8.0 + in_block / 16.0) r->slipping = 1;
+        if (fabs(err) < 2.0) r->slipping = 0;
+        if (skip == 0.0 && r->slipping) {
+            skip = (double)lrint(fmax(-4.0, fmin(4.0, err))); /* + ahead (too full), - back: crossfaded below */
+            if (r->pos + skip > (double)w - frames - 4.0) skip = 0.0;
+            if (skip != 0.0) {
+                r->avg -= skip;
+                r->ex_net += skip;
+                atomic_fetch_add(&r->slips, 1);
+            }
+        }
+        double drift = r->ex_net + (target - r->ex_tgt0);
+        if (r->ex_t > 15.0 && fabs(drift) > 100e-6 * 48000.0 * (r->ex_t - 5.0) + 16.0) r->resample = 1;
+    }
     r->ratio = 1.0 + dev;
     atomic_store_explicit(&r->ppm, (int)lrint(dev * 1e6), memory_order_relaxed);
 
@@ -140,7 +173,7 @@ int ar_pull(ARing *r, float *dst, int frames, int in_block, uint64_t now_ns)
         unsigned bi = (unsigned)to;
         float bt = (float)(to - floor(to));
         float L = cubic(r->buf, bi, 0, bt), R = cubic(r->buf, bi, 1, bt);
-        if (skip > 0.0 && i < XF) {
+        if (skip != 0.0 && i < XF) {
             unsigned ai = (unsigned)from;
             float at = (float)(from - floor(from)), x = (float)i / XF;
             L = cubic(r->buf, ai, 0, at) * (1.f - x) + L * x;

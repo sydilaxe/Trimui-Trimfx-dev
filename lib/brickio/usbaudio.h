@@ -69,6 +69,8 @@ typedef struct {
     unsigned underruns, skips, dropouts, in_clips, out_clips, reopens;
     unsigned cushion, margin;         /* frames */
     int drift_ppm;
+    int exact;                        /* the input read sample for sample (one interface, one clock) */
+    unsigned slips;                   /* exact: whole-frame corrections, crossfaded */
     float latency_ms;                 /* input cushion + the output's buffering, roughly */
 } UaStatus;
 void ua_status(UaStatus *s);

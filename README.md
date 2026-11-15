@@ -349,7 +349,11 @@ means TrimFX's output is hitting full scale: turn MASTER > OUT down. The top bar
   1024-frame periods add about 60 ms);
 - it runs 32-bit float, so a 24-bit / 48 kHz interface keeps its 24 bits;
 - it offers each channel pair of a multichannel interface;
-- input and output can be different interfaces;
+- input and output can be different interfaces. **One interface both ways is best for real-time
+  playing:** one clock, so the input is passed through bit for bit (no resampling), with a smaller
+  cushion that settles lower the longer it runs cleanly. The INPUT line then says "one clock:
+  bit-exact". About 6-9 ms through the effects at 64 frames, plus the interface's own converters;
+- the audio threads keep to a core of their own (`TFX_PIN=0` in `launch.sh` turns this off);
 - the audio threads run at real-time priority, and a device that stops is reopened.
 
 SETUP has the audio rows:
