@@ -333,6 +333,57 @@ SDL2) and writes the `.muxapp`. `make test` runs the engine tests. Also:
 - `make shots` saves screenshots of every page.
 - `make wavs` writes a WAV of every algorithm on a test signal.
 
+## Crackles, levels and the log
+
+**Levels:** the MASTER box shows the input and output, left and right, from -48 dB to 0 (green, amber
+from -12, red from -3). Each meter has a peak hold and a clip light that stays lit for 2 s. The input
+clip light means the interface's input itself is overloaded: turn its gain down. The output clip light
+means TrimFX's output is hitting full scale: turn MASTER > OUT down. The top bar says
+**INPUT DROPOUT** for 3 s whenever the input ran dry or had to skip.
+
+**Audio format:** TrimFX takes and gives 32-bit float. SDL converts from whatever the interface and
+MustardOS's sound layer run (16, 24 or 32 bits), so a 24-bit interface's input isn't cut down to 16
+bits. The log shows the format the hardware actually runs at.
+
+**The input's cushion:** USB input and output callbacks don't arrive in step. TrimFX keeps a cushion of
+input in hand (a capture buffer, an output buffer and a margin). If the input still runs dry, the
+margin grows by 256 frames each time, up to 4096, so a jittery interface settles after a glitch or two.
+
+**The log:** everything goes to `log.txt` in the app folder (`MUOS/application/TrimFX/log.txt` on
+the card). **SETUP > LOG** sets how much: BASIC writes a status line every 10 s, DETAIL every second
+plus every button and MIDI message. `TFX_LOG=2` in `launch.sh` starts in DETAIL. The lines to read:
+
+| Line | What it says |
+|---|---|
+| `AUDIO` | the devices opened: the driver, the rate, the buffer |
+| `HW` | what the hardware really runs at, from the kernel: the format (`S16_LE`, `S24_3LE`, `S32_LE`), rate, period |
+| `STAT` | the audio thread's load (avg / peak), **dropouts** (the output ran dry: a bigger `TFX_BUFFER` helps), the longest gap between callbacks |
+| `INPUT` | since the last line: input **underruns** and **skips** (the USB input's timing), **input clips**, **output clips**, the cushion and its margin |
+| `JUMP` | a click made inside TrimFX's own output |
+| `HINT` | what to change, when the log sees a problem |
+
+A crackle with none of these counting (no dropouts, underruns, skips, clips or JUMP lines) happens
+after TrimFX, in the driver or the interface. To share a log, play until it crackles, quit TrimFX
+(MENU), and send `log.txt`.
+
+## Updates
+
+TrimFX updates itself from this repository's latest GitHub release, like Conduit, Columbia Street and
+Jaffedrone. A few seconds after it starts (once Wi-Fi is up), it asks GitHub for the latest release,
+retrying every minute up to five times. If a newer version is out, a prompt comes up over the board
+while the sound carries on. **A** downloads it, checks it and swaps the new files in, then TrimFX
+restarts as the new version. **B** waits; **SETUP > UPDATES** offers it again, or checks by hand.
+An update never touches your preset slots, `state.txt`, `midimap.txt` or the log. A download that
+fails or is damaged changes nothing. `TFX_UPDATE=0` in `launch.sh` turns the check off.
+
+For releases to reach installed copies, keep three things the same:
+- they must be full releases marked Latest, tagged `v<number>...` higher than the last (the release
+  workflow does this);
+- the package must stay named `TrimFX-mustardos.muxapp`;
+- the app must stay in its `TrimFX/` folder.
+
+`make update-test` (CI runs it) installs a fake release over a test folder, end to end.
+
 ## Releasing
 
 Tag a commit on `main` and push the tag:
@@ -357,6 +408,9 @@ TrimFX is GPL-3.0-or-later (`LICENSE`). It builds on:
 - **Conduit** (sydilaxe, GPL-3): the MidiVerb II Bloom emulation, exact and adjustable. That code
   follows thement's [midiverb_emulator](https://github.com/thement/midiverb_emulator) analysis.
 - **SP-1 Master** (sydilaxe, MIT, `src/master/`): the four mastering chains.
+- **The self-updater** (`src/update.c`, `src/net.c`, from Conduit, Columbia Street and RadioScan,
+  GPL-3) with **Mbed TLS** 3.6.7 (Apache-2.0, fetched at build time from its pinned release;
+  `LICENSE-mbedtls.txt` ships in the package) and the Mozilla CA bundle (`cacert.pem`, MPL-2.0).
 - **Trimui-Brick-Resources / Jaffedrone** (sydilaxe): input, LEDs, performance log, drawing and
   font (Noto Sans Mono, OFL), the SDL2 headers and the build approach.
 - **ClassicReverb RE-04** (AnClark, GPL-3): CLASSIC uses its reverse-engineered structure and

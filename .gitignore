@@ -4,3 +4,6 @@ __pycache__/
 Apps/TrimFX/state.txt
 Apps/TrimFX/log.txt
 Apps/TrimFX/presets/slot*.txt
+third_party/mbedtls/
+third_party/mbedtls.tar.bz2
+Apps/TrimFX/midimap.txt

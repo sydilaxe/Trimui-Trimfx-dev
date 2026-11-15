@@ -16,6 +16,7 @@
 #define _GNU_SOURCE
 #include <SDL2/SDL.h>
 #include <errno.h>
+#include <glob.h>
 #include <math.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -32,6 +33,8 @@
 #include "engine.h"
 #include "gfx.h"
 #include "midi.h"
+#include "net.h"
+#include "update.h"
 #include "perflog.h"
 #include "ringleds.h"
 
@@ -82,7 +85,10 @@ static char out_want[128], in_want[128];   /* the names picked, kept across hot-
 #define RING 16384 /* frames, a power of two */
 static float ring[RING * 2];
 static atomic_uint ring_w, ring_r;
-static atomic_uint underruns, overruns;
+static atomic_uint underruns, overruns, in_clips, out_clips;
+static atomic_uint ring_fill;  /* the input's cushion, frames, as last seen by the output */
+static atomic_int in_block = 512; /* the capture side's buffer, frames */
+static atomic_uint jit_margin = 256; /* the cushion's safety margin: grows each time the input runs dry */
 static atomic_int have_input;
 static atomic_int spk_guard; /* 1: the output fell back to the internal speaker without being asked: silent */
 
@@ -101,16 +107,24 @@ static void flush_denormals(void)
 static void in_cb(void *ud, Uint8 *stream, int len)
 {
     (void)ud;
-    const int16_t *s = (const int16_t *)stream;
-    int frames = len / 4;
+    /* 32-bit float: SDL converts from whatever the interface runs (16, 24 or 32 bits) without
+     * cutting a 24-bit input down to 16 */
+    const float *s = (const float *)stream;
+    int frames = len / 8;
     unsigned w = atomic_load_explicit(&ring_w, memory_order_relaxed), r = atomic_load_explicit(&ring_r, memory_order_acquire);
+    int clips = 0;
     for (int i = 0; i < frames; i++) {
         if (w - r >= RING - 1) { atomic_fetch_add(&overruns, 1); break; }
-        ring[2 * (w & (RING - 1))] = s[2 * i] * (1.f / 32768.f);
-        ring[2 * (w & (RING - 1)) + 1] = s[2 * i + 1] * (1.f / 32768.f);
+        float a = s[2 * i], b = s[2 * i + 1];
+        if (a != a) a = 0.f; /* never let a NaN in */
+        if (b != b) b = 0.f;
+        if (fabsf(a) >= 0.9999f || fabsf(b) >= 0.9999f) clips++;
+        ring[2 * (w & (RING - 1))] = a;
+        ring[2 * (w & (RING - 1)) + 1] = b;
         w++;
     }
     atomic_store_explicit(&ring_w, w, memory_order_release);
+    if (clips) atomic_fetch_add(&in_clips, (unsigned)clips);
 }
 
 static void out_cb(void *ud, Uint8 *stream, int len)
@@ -121,34 +135,74 @@ static void out_cb(void *ud, Uint8 *stream, int len)
     static int have_p;
     static float in[4096 * 2], out[4096 * 2];
     if (!ftz) flush_denormals(), ftz = 1;
-    int16_t *s = (int16_t *)stream;
-    int frames = len / 4;
+    float *s = (float *)stream;
+    static int16_t s16[4096 * 2]; /* a 16-bit copy for the LEDs' meter and the log's click check */
+    int frames = len / 8;
     if (frames > 4096) frames = 4096;
     uint64_t t0 = perf_audio_begin(frames);
     if (take(&p)) have_p = 1;
-    /* the input: what the capture side has given; keep about a buffer and a half in hand */
+    /* the input, through a jitter buffer. The capture and playback callbacks don't arrive in step,
+     * so a cushion of input is kept in hand: one capture buffer, this output buffer and a margin.
+     * Until it has built up (at the start, or after running dry) the input is held back (silence,
+     * faded); once primed, each callback takes exactly its frames. Running dry fades out and primes
+     * again; drifting far ahead (the two clocks differ) skips back to the cushion with a crossfade.
+     * Taking whatever had arrived, as before, left gaps of silence in buffers: crackles. */
+    static int primed, fade_in;
     unsigned w = atomic_load_explicit(&ring_w, memory_order_acquire), r = atomic_load_explicit(&ring_r, memory_order_relaxed);
-    unsigned fill = w - r, keep = (unsigned)buffer * 3 / 2 + (unsigned)frames;
-    if (fill > keep + (unsigned)buffer * 2) { r = w - keep; atomic_fetch_add(&overruns, 1); fill = w - r; } /* drifted ahead: drop */
-    int got = atomic_load(&have_input) ? (int)(fill < (unsigned)frames ? fill : (unsigned)frames) : 0;
-    if (atomic_load(&have_input) && got < frames && fill > 0) atomic_fetch_add(&underruns, 1);
-    for (int i = 0; i < got; i++) {
-        in[2 * i] = ring[2 * (r & (RING - 1))];
-        in[2 * i + 1] = ring[2 * (r & (RING - 1)) + 1];
-        r++;
-    }
-    for (int i = got; i < frames; i++) in[2 * i] = in[2 * i + 1] = 0.f;
+    unsigned fill = w - r, target = (unsigned)atomic_load(&in_block) + (unsigned)frames + atomic_load_explicit(&jit_margin, memory_order_relaxed);
+    if (target > RING / 2) target = RING / 2;
+    atomic_store_explicit(&ring_fill, fill, memory_order_relaxed);
+    int live_in = atomic_load(&have_input);
+    if (!live_in) primed = 0;
+    if (live_in && !primed && fill >= target) primed = 1, fade_in = 1;
+    if (live_in && primed && fill < (unsigned)frames) {
+        /* ran dry: play out what there is, faded, and build the cushion up again */
+        atomic_fetch_add(&underruns, 1);
+        if (atomic_load_explicit(&jit_margin, memory_order_relaxed) < 4096) atomic_fetch_add(&jit_margin, 256);
+        int got = (int)fill;
+        for (int i = 0; i < got; i++) {
+            float g = (float)(got - i) / (float)(got + 1);
+            in[2 * i] = ring[2 * (r & (RING - 1))] * g;
+            in[2 * i + 1] = ring[2 * (r & (RING - 1)) + 1] * g;
+            r++;
+        }
+        for (int i = got; i < frames; i++) in[2 * i] = in[2 * i + 1] = 0.f;
+        primed = 0;
+    } else if (live_in && primed) {
+        unsigned skip = 0;
+        if (fill > target + (unsigned)atomic_load(&in_block) * 2 + (unsigned)frames) { skip = fill - target; atomic_fetch_add(&overruns, 1); }
+        const int XF = 64;
+        for (int i = 0; i < frames; i++) {
+            unsigned a = r + (unsigned)i, b = a + skip;
+            float l = ring[2 * (b & (RING - 1))], rr = ring[2 * (b & (RING - 1)) + 1];
+            if (skip && i < XF) { /* crossfade from where it was to where it skips to */
+                float t = (float)i / XF;
+                l = ring[2 * (a & (RING - 1))] * (1.f - t) + l * t;
+                rr = ring[2 * (a & (RING - 1)) + 1] * (1.f - t) + rr * t;
+            }
+            if (fade_in && i < XF) { float t = (float)i / XF; l *= t; rr *= t; }
+            in[2 * i] = l;
+            in[2 * i + 1] = rr;
+        }
+        fade_in = 0;
+        r += skip + (unsigned)frames;
+    } else
+        for (int i = 0; i < frames; i++) in[2 * i] = in[2 * i + 1] = 0.f; /* priming, or no input */
     atomic_store_explicit(&ring_r, r, memory_order_release);
     if (have_p) engine_process(eng, &p, in, out, frames);
     else memset(out, 0, sizeof(float) * 2 * frames);
+    int oclips = 0, guard = atomic_load_explicit(&spk_guard, memory_order_relaxed);
     for (int i = 0; i < 2 * frames; i++) {
-        float v = out[i] * 32767.f;
-        s[i] = (int16_t)(v > 32767.f ? 32767.f : v < -32768.f ? -32768.f : v);
+        float v = out[i];
+        if (v > 1.f || v < -1.f) oclips++, v = v > 1.f ? 1.f : -1.f;
+        if (guard) v = 0.f;
+        s[i] = v;
+        s16[i] = (int16_t)(v * 32767.f);
     }
-    for (int i = 2 * frames; i < len / 2; i++) s[i] = 0;
-    if (atomic_load_explicit(&spk_guard, memory_order_relaxed)) memset(s, 0, (size_t)len);
-    ringleds_audio(s, frames);
-    perf_audio_output(s, frames);
+    if (oclips) atomic_fetch_add(&out_clips, (unsigned)oclips);
+    for (int i = 2 * frames; i < len / 4; i++) s[i] = 0.f;
+    ringleds_audio(s16, frames);
+    perf_audio_output(s16, frames);
     perf_audio_end(t0);
 }
 
@@ -208,6 +262,39 @@ static const char *pick(int capture)
     return NULL;
 }
 
+/* what the hardware really runs at, from the kernel: the format (S16_LE, S24_3LE, S32_LE...), the
+ * rate and the period of each open stream; logged a moment after a device opens */
+static Uint32 hw_log_at;
+static void log_hw(void)
+{
+    glob_t g;
+    if (glob("/proc/asound/card*/pcm*/sub*/hw_params", 0, NULL, &g) != 0) { perf_log("HW", "no /proc/asound streams to read"); return; }
+    for (size_t i = 0; i < g.gl_pathc; i++) {
+        FILE *f = fopen(g.gl_pathv[i], "r");
+        if (!f) continue;
+        char line[128], fmt[32] = "", rate[32] = "", ch[16] = "", per[32] = "";
+        int closed = 0;
+        while (fgets(line, sizeof line, f)) {
+            if (!strncmp(line, "closed", 6)) closed = 1;
+            sscanf(line, "format: %31s", fmt);
+            sscanf(line, "rate: %31s", rate);
+            sscanf(line, "channels: %15s", ch);
+            sscanf(line, "period_size: %31s", per);
+        }
+        fclose(f);
+        if (closed || !*fmt) continue;
+        int card = -1;
+        char dev[16] = "";
+        sscanf(g.gl_pathv[i], "/proc/asound/card%d/%15[^/]", &card, dev);
+        char idp[64], id[48] = "?";
+        snprintf(idp, sizeof idp, "/proc/asound/card%d/id", card);
+        FILE *fi = fopen(idp, "r");
+        if (fi) { if (fgets(id, sizeof id, fi)) id[strcspn(id, "\r\n")] = 0; fclose(fi); }
+        perf_log("HW", "card %d %s %s: %s, %s Hz, %s ch, period %s frames", card, id, dev, fmt, rate, ch, per);
+    }
+    globfree(&g);
+}
+
 static void audio_open_out(const char *name)
 {
     char keep[128];
@@ -216,7 +303,7 @@ static void audio_open_out(const char *name)
     if (out_dev) SDL_CloseAudioDevice(out_dev), out_dev = 0;
     SDL_AudioSpec want = {0}, have;
     want.freq = rate;
-    want.format = AUDIO_S16SYS;
+    want.format = AUDIO_F32SYS;
     want.channels = 2;
     want.samples = (Uint16)buffer;
     want.callback = out_cb;
@@ -232,6 +319,7 @@ static void audio_open_out(const char *name)
     perf_log("AUDIO", "out: SDL %s, %d Hz, %d frames, %s", SDL_GetCurrentAudioDriver(), have.freq, have.samples,
              name ? name : "default");
     SDL_PauseAudioDevice(out_dev, 0);
+    hw_log_at = SDL_GetTicks() + 1500;
 }
 
 static void audio_open_in(const char *name)
@@ -243,7 +331,7 @@ static void audio_open_in(const char *name)
     atomic_store(&have_input, 0);
     SDL_AudioSpec want = {0}, have;
     want.freq = rate;
-    want.format = AUDIO_S16SYS;
+    want.format = AUDIO_F32SYS;
     want.channels = 2;
     want.samples = (Uint16)buffer;
     want.callback = in_cb;
@@ -252,6 +340,8 @@ static void audio_open_in(const char *name)
     if (!in_dev) { in_name[0] = 0; perf_log("AUDIO", "no capture: %s", SDL_GetError()); return; }
     snprintf(in_name, sizeof in_name, "%s", name ? name : "");
     perf_log("AUDIO", "in: %d Hz, %d frames, %s", have.freq, have.samples, name ? name : "default");
+    hw_log_at = SDL_GetTicks() + 1500;
+    atomic_store(&in_block, have.samples > 0 ? have.samples : 512);
     atomic_store(&ring_r, atomic_load(&ring_w));
     atomic_store(&have_input, 1);
     SDL_PauseAudioDevice(in_dev, 0);
@@ -363,7 +453,7 @@ enum { COL_TONE, COL_MOD, COL_DELAY, COL_VERB, COL_MASTER, NCOL };
 enum { R_ALGO, R_K1, R_K2, R_K3, R_K4, R_D1, R_D2, R_D3, R_D4, R_MIX, NPROW };
 enum { MR_IN, MR_OUT, MR_DRY, MR_TEMPO, MR_ORDER, MR_SLOT, MR_SETUP, MR_STICKS, NMROW };
 enum { OV_NONE, OV_SETUP, OV_STICKS, OV_DEEP };
-enum { SR_INPUT, SR_OUTPUT, SR_SAVE, SR_LOAD, SR_FACTORY, SR_MIDI, SR_MIDIMAP, SR_INIT, NSROW };
+enum { SR_INPUT, SR_OUTPUT, SR_SAVE, SR_LOAD, SR_FACTORY, SR_MIDI, SR_MIDIMAP, SR_UPDATE, SR_LOG, SR_INIT, NSROW };
 #define NXROW (3 + NAX * 2 * 2)
 static int col = COL_MOD, focus_mod = M_MOD;
 static int sel[NCOL] = {R_K1, R_K1, R_K1, R_K1, MR_IN};
@@ -574,6 +664,7 @@ static int init_armed;
 /* what a MIDI mapping does (see the MIDI section) */
 enum { MA_PARAM, MA_MIX, MA_ALGO, MA_ALGOSTEP, MA_BYPASS, MA_FREEZE, MA_MASTER, MA_ORDER, MA_PAGE, MA_PAGETO,
        MA_PRESET, MA_SAVE, MA_TAP, MA_STICK, MA_JOG, MA_N };
+static void update_row_a(void);
 static int midi_learn;      /* MIDI LEARN: on until B (or SELECT held) */
 static int learn_custom;    /* 1: a button chose the target (footswitch, freeze...), not the board */
 static signed char learn_act, learn_mod, learn_arg;
@@ -593,6 +684,10 @@ static void adjust(int dir, int big)
         case SR_OUTPUT: cycle_device(0, dir); break;
         case SR_SAVE: case SR_LOAD: preset_slot = (preset_slot + dir + 16) % 16; break;
         case SR_FACTORY: factory_pick = (factory_pick + dir + NFACTORY) % NFACTORY; break;
+        case SR_LOG:
+            perf_set_level((perf_level() + dir + 3) % 3);
+            perf_log("LOG", "level %d", perf_level());
+            break;
         default: break;
         }
         changed();
@@ -672,6 +767,8 @@ static void press_a(void)
             overlay = OV_NONE;
             learn_on(1);
             return;
+        case SR_UPDATE: update_row_a(); return;
+        case SR_LOG: adjust(1, 0); return;
         case SR_MIDIMAP: {
             char path[600];
             midimap_path(path, sizeof path);
@@ -718,6 +815,85 @@ static Uint32 rep_at[BI_COUNT];
 static int rep_n[BI_COUNT];
 static int running = 1;
 
+/* ---------------------------------------------------------------- the log (perflog.h) */
+/* With each STAT line (every 10 s, every second at DETAIL): what the input did since the last one.
+ * A crackle with "underruns" or "skips" here is the USB input's timing; with "input clips" the
+ * interface's input is overloaded (turn its gain down); with "output clips" TrimFX's output is
+ * (MASTER > OUT down); with none of these and no JUMP line, it is after TrimFX (the driver). */
+static void log_input(void)
+{
+    static unsigned u0, o0, ic0, oc0;
+    unsigned u = atomic_load(&underruns), o = atomic_load(&overruns), ic = atomic_load(&in_clips), oc = atomic_load(&out_clips);
+    perf_log("INPUT", "underruns +%u, skips +%u, input clips +%u, output clips +%u | cushion %u frames (margin %u, capture block %d) | %s",
+             u - u0, o - o0, ic - ic0, oc - oc0, atomic_load(&ring_fill), atomic_load(&jit_margin), atomic_load(&in_block),
+             in_dev ? (*in_name ? in_name : "default input") : "no input");
+    u0 = u, o0 = o, ic0 = ic, oc0 = oc;
+}
+
+/* ---------------------------------------------------------------- self-update (update.h) */
+/* As in Conduit, Columbia Street and Jaffedrone: a few seconds after starting (so Wi-Fi is up), then
+ * every minute until GitHub has answered, five tries; a newer release brings up a prompt (the sound
+ * goes on underneath); A downloads it and swaps the files in, keeping the presets, state, MIDI map
+ * and log; the app then quits with RELAUNCH_STATUS and launch.sh starts the new version. */
+static int upd_auto, upd_tries, upd_asked, upd_open, upd_net;
+static Uint32 upd_next, relaunch_at;
+
+static void upd_net_init(void)
+{
+    if (upd_net) return;
+    char ca[600];
+    snprintf(ca, sizeof ca, "%s/cacert.pem", app_dir);
+    net_init(ca);
+    upd_net = 1;
+}
+
+static void update_watch(Uint32 now)
+{
+    const UpdateStatus *u = update_status();
+    static int logged;
+    if ((u->state == UP_CURRENT || u->state == UP_AVAILABLE) && !logged) {
+        logged = 1;
+        perf_log("UPDATE", "the latest release is v%s, this is v" TFX_VERSION, u->latest);
+    }
+    if (upd_auto && (u->state == UP_IDLE || u->state == UP_CHECK_FAILED) && upd_tries < 5 && (Sint32)(now - upd_next) >= 0) {
+        if (u->state == UP_CHECK_FAILED) perf_log("UPDATE", "%s", u->err);
+        upd_tries++;
+        upd_next = now + 60000;
+        update_check_start();
+    }
+    if (u->state == UP_AVAILABLE && !upd_asked) upd_asked = upd_open = 1;
+    if (u->state == UP_INSTALLED && !relaunch_at) {
+        perf_log("UPDATE", "v%s installed, restarting", u->latest);
+        relaunch_at = now + 1200; /* long enough to read "restarting" */
+        if (!relaunch_at) relaunch_at = 1;
+    }
+    if (relaunch_at && (Sint32)(now - relaunch_at) >= 0) running = 0;
+}
+
+/* SETUP > UPDATES: A checks now, or opens the prompt when a release is waiting */
+static void update_row_a(void)
+{
+    const UpdateStatus *u = update_status();
+    if (u->state == UP_AVAILABLE || u->state == UP_FAILED) { overlay = OV_NONE; upd_open = 1; return; }
+    if (u->state == UP_CHECKING || u->state == UP_INSTALLING || u->state == UP_INSTALLED) return;
+    upd_net_init();
+    upd_asked = 0;
+    update_check_start();
+    toast("CHECKING FOR AN UPDATE");
+}
+
+/* the prompt owns the buttons while it is up: A updates (or tries again), B closes it */
+static void update_button(BiButton b)
+{
+    const UpdateStatus *u = update_status();
+    if (u->state == UP_INSTALLING || u->state == UP_INSTALLED) return;
+    if (b == BI_A && (u->state == UP_AVAILABLE || u->state == UP_FAILED)) { update_install_start(app_dir); return; }
+    if (b == BI_B || b == BI_MENU) {
+        upd_open = 0;
+        if (u->state == UP_AVAILABLE) toast("v%s: SETUP > UPDATES WHEN YOU WANT IT", u->latest);
+    }
+}
+
 static void move_row(int dir)
 {
     int *s = sel_now(), n = rows_now();
@@ -730,6 +906,7 @@ static void button(BiButton b, int down)
     if (!down) return;
     rep_at[b] = SDL_GetTicks() + 350;
     rep_n[b] = 0;
+    if (upd_open) { update_button(b); return; }
     if (b == BI_SELECT) { sel_down_at = SDL_GetTicks(); sel_long = 0; }
     if (b != BI_A) init_armed = 0;
     if (midi_learn && !overlay) {
@@ -1514,8 +1691,37 @@ static void master_strip(int x, int w)
 {
     int focused = col == COL_MASTER && !overlay, y = PED_Y;
     if (focused) gfx_rect(x - 4, y - 4, w + 8, PED_H + 8, 3, ACCENT);
-    stamp_c(x + w / 2, y + 10, "TRIMFX", 1, 2);
-    stamp_c(x + w / 2, y + 52, "IN  FX  OUT", 0, 0);
+    stamp_c(x + w / 2, y + 8, "TRIMFX", 0, 4);
+    /* the levels: input and output, left and right, with a peak hold and a clip light each */
+    {
+        static float hold[2][2];
+        static Uint32 hold_t[2][2], clip_t[2];
+        static unsigned ic_seen, oc_seen;
+        Uint32 now = SDL_GetTicks();
+        unsigned ic = atomic_load(&in_clips), oc = atomic_load(&out_clips);
+        if (ic != ic_seen) ic_seen = ic, clip_t[0] = now + 2000;
+        if (oc != oc_seen) oc_seen = oc, clip_t[1] = now + 2000;
+        for (int k = 0; k < 2; k++) {
+            const float *vu = k ? vu_out : vu_in;
+            int my = y + 36 + k * 22, bx = x + 44, bw = w - 44 - 26, seg = 22;
+            stamp(x + 10, my - 1, k ? "OUT" : "IN", 0, 0);
+            gfx_fill(bx - 2, my - 2, bw + 4, 17, 0x101114);
+            for (int c = 0; c < 2; c++) {
+                float db = vu[c] > 1e-6f ? 20.f * log10f(vu[c]) : -120.f, pos = clampf((db + 48.f) / 48.f, 0.f, 1.f);
+                if (pos >= hold[k][c] || (Sint32)(now - hold_t[k][c]) > 0) hold[k][c] = pos, hold_t[k][c] = now + 1500;
+                int lit = (int)(pos * seg + 0.5f), hs = (int)(hold[k][c] * seg + 0.5f) - 1;
+                float sw = (float)bw / seg;
+                for (int sgi = 0; sgi < seg; sgi++) {
+                    float sdb = -48.f + 48.f * (sgi + 1) / seg;
+                    uint32_t on = sdb > -3.f ? 0xff3a2a : sdb > -12.f ? 0xffb020 : 0x3ad06a;
+                    uint32_t cc = sgi < lit ? on : sgi == hs && hs > 0 ? gfx_mix(on, 0xffffff, 0.3f) : gfx_mix(0x101114, on, 0.18f);
+                    gfx_fill(bx + (int)(sgi * sw), my + c * 7, (int)sw - 1, 6, cc);
+                }
+            }
+            int clipped = (Sint32)(clip_t[k] - now) > 0;
+            gfx_fill(x + w - 22, my - 1, 12, 15, clipped ? 0xff2b1a : 0x3a1a18);
+        }
+    }
     int ry0 = y + 86;
     for (int r = 0; r < NMROW; r++) {
         int ry = ry0 + r * 29, here = focused && sel[COL_MASTER] == r;
@@ -1561,10 +1767,6 @@ static void master_strip(int x, int w)
         else snprintf(lab, sizeof lab, "%.5s/%.5s", eng_info(m)->pname[a][2 * s], eng_info(m)->pname[a][2 * s + 1]);
         stamp_c(x + w / 2, cy + sz / 2 + 3, lab, 0, 0);
     }
-    /* the levels: a light each side of the maker's name, in and out */
-    float li = fmaxf(vu_in[0], vu_in[1]), lo = fmaxf(vu_out[0], vu_out[1]);
-    led(x + 18, y + 62, li > 0.9f ? 0xff2b1a : 0xffa21a, li > 0.01f);
-    led(x + w - 18, y + 62, lo > 0.9f ? 0xff2b1a : 0xffa21a, lo > 0.01f);
 }
 
 /* ---------------------------------------------------------------- the lights */
@@ -1645,11 +1847,16 @@ static void draw_top(void)
 {
     char b[96];
     int guard = atomic_load(&spk_guard);
+    static unsigned dro_seen;
+    static Uint32 dro_until;
+    unsigned dro = atomic_load(&underruns) + atomic_load(&overruns);
+    if (dro != dro_seen) { if (dro_seen) dro_until = SDL_GetTicks() + 3000; dro_seen = dro; }
+    int dropping = (Sint32)(dro_until - SDL_GetTicks()) > 0;
     snprintf(b, sizeof b, "%d  %s   %.0f BPM%s", preset_slot + 1, patch_name, base.bpm,
-             guard ? "   NO USB OUT: SPEAKER MUTED" : in_dev ? "" : "   NO INPUT");
+             guard ? "   NO USB OUT: SPEAKER MUTED" : dropping ? "   INPUT DROPOUT" : in_dev ? "" : "   NO INPUT");
     int w = gfx_text_w(b, FONT_SMALL) + 20;
     gfx_fill(10, 5, w, 26, 0x14161a);
-    gfx_text(20, 7, b, in_dev && !guard ? 0xf2f2f2 : 0xff8080, FONT_SMALL);
+    gfx_text(20, 7, b, in_dev && !guard && !dropping ? 0xf2f2f2 : 0xff8080, FONT_SMALL);
     /* the Brick Pro's top bar, as lit now */
     gfx_fill(326, 5, 8 * 18 + 12, 26, 0x14161a);
     for (int k = 0; k < 8; k++) screen_led(338 + k * 18, 18, 5.f, led_meter ? 0 : led_bar[k]);
@@ -1752,9 +1959,28 @@ static void draw_overlay(void)
             case SR_FACTORY: { Patch tmp; snprintf(lab, sizeof lab, "FACTORY"); snprintf(v, sizeof v, "%d %s  (A)", factory_pick + 1, patch_factory(&tmp, factory_pick)); } break;
             case SR_MIDI: snprintf(lab, sizeof lab, "MIDI LEARN"); snprintf(v, sizeof v, "%s  (A)", midi_count() ? midi_name() : "NO MIDI DEVICE"); break;
             case SR_MIDIMAP: snprintf(lab, sizeof lab, "MIDI MAP"); snprintf(v, sizeof v, "%d MAPPINGS   TEMPLATE (A)", nmap); break;
+            case SR_LOG: {
+                static const char *const LV[3] = {"OFF", "BASIC: STATUS EVERY 10 S", "DETAIL: EVERY SECOND"};
+                snprintf(lab, sizeof lab, "LOG");
+                snprintf(v, sizeof v, "%s  < >", LV[perf_level() < 0 ? 0 : perf_level() > 2 ? 2 : perf_level()]);
+            } break;
+            case SR_UPDATE: {
+                const UpdateStatus *u = update_status();
+                snprintf(lab, sizeof lab, "UPDATES");
+                switch (u->state) {
+                case UP_CHECKING: snprintf(v, sizeof v, "v%s  CHECKING...", TFX_VERSION); break;
+                case UP_CURRENT: snprintf(v, sizeof v, "v%s  THE LATEST  CHECK (A)", TFX_VERSION); break;
+                case UP_AVAILABLE: snprintf(v, sizeof v, "v%s OUT  UPDATE (A)", u->latest); break;
+                case UP_CHECK_FAILED: snprintf(v, sizeof v, "v%s  NO ANSWER  CHECK (A)", TFX_VERSION); break;
+                case UP_INSTALLING: snprintf(v, sizeof v, "DOWNLOADING %d%%", u->progress); break;
+                case UP_INSTALLED: snprintf(v, sizeof v, "UPDATED: RESTARTING"); break;
+                case UP_FAILED: snprintf(v, sizeof v, "FAILED  TRY AGAIN (A)"); break;
+                default: snprintf(v, sizeof v, "v%s  CHECK (A)", TFX_VERSION); break;
+                }
+            } break;
             default: snprintf(lab, sizeof lab, "INIT ALL"); snprintf(v, sizeof v, "A, twice"); break;
             }
-            row_box(x + 16, ry + r * 38, w - 32, ov_sel[OV_SETUP] == r, lab, v, C_ACC, NULL, 0, -1.f);
+            row_box(x + 16, ry + r * 34, w - 32, ov_sel[OV_SETUP] == r, lab, v, C_ACC, NULL, 0, -1.f);
         }
         const char *lines[] = {
             "FX SEND: plug a USB interface into the top port. Its input is",
@@ -1763,10 +1989,10 @@ static void draw_overlay(void)
             "with trails. INPUT / OUTPUT: AUTO picks the first USB device;",
             "with none, the speaker stays silent unless you choose it here.",
         };
-        for (int i = 0; i < 5; i++) gfx_text(x + 24, ry + NSROW * 38 + 20 + i * 24, lines[i], C_DIM, FONT_SMALL);
+        for (int i = 0; i < 5; i++) gfx_text(x + 24, ry + NSROW * 34 + 14 + i * 22, lines[i], C_DIM, FONT_SMALL);
         snprintf(v, sizeof v, "TrimFX %s  %s  buffer %d  underruns %u  overruns %u", TFX_VERSION, is_pro ? "Brick Pro" : "Brick", buffer,
                  atomic_load(&underruns), atomic_load(&overruns));
-        gfx_text(x + 24, ry + NSROW * 38 + 150, v, C_DIM, FONT_SMALL);
+        gfx_text(x + 24, ry + NSROW * 34 + 132, v, C_DIM, FONT_SMALL);
         return;
     }
     /* STICKS: the matrix on the left, the sticks on the right */
@@ -1831,6 +2057,37 @@ static void draw(void)
         gfx_rect(bx, by, bw, 66, 2, ACCENT);
         text_c(W / 2, by + 6, l1, ACCENT, FONT_LARGE);
         text_c(W / 2, by + 40, l2, C_TEXT, FONT_SMALL);
+    }
+    if (upd_open) {
+        const UpdateStatus *u = update_status();
+        int st = u->state, w = 720, h = 300, x = W / 2 - w / 2, y = 200;
+        char b2[200];
+        gfx_fill_a(0, 0, W, H, 0x000000, 160);
+        gfx_fill(x, y, w, h, C_BG);
+        gfx_fill(x, y, w, 4, ACCENT);
+        gfx_rect(x, y, w, h, 2, ACCENT);
+        snprintf(b2, sizeof b2, "TrimFX v%s is out", u->latest);
+        text_c(W / 2, y + 30, b2, ACCENT, FONT_LARGE);
+        text_c(W / 2, y + 78, "this is v" TFX_VERSION, C_DIM, FONT_SMALL);
+        if (st == UP_INSTALLING || st == UP_INSTALLED) {
+            int bw = 520, bx = W / 2 - bw / 2, pc = st == UP_INSTALLED ? 100 : u->progress;
+            pc = pc < 0 ? 0 : pc > 100 ? 100 : pc;
+            gfx_fill(bx, y + 140, bw, 24, C_PANEL);
+            gfx_fill(bx + 3, y + 143, (bw - 6) * pc / 100, 18, ACCENT);
+            if (st == UP_INSTALLED) snprintf(b2, sizeof b2, "UPDATED: RESTARTING...");
+            else snprintf(b2, sizeof b2, "DOWNLOADING... %d%%", pc);
+            text_c(W / 2, y + 186, b2, C_TEXT, FONT_SMALL);
+        } else if (st == UP_FAILED) {
+            snprintf(b2, sizeof b2, "%s", u->err);
+            fit(b2, w - 60);
+            text_c(W / 2, y + 136, b2, C_BAD, FONT_SMALL);
+            text_c(W / 2, y + 170, "nothing was changed", C_DIM, FONT_SMALL);
+            text_c(W / 2, y + h - 50, "A try again    B close", C_TEXT, FONT_SMALL);
+        } else {
+            text_c(W / 2, y + 136, "Download it and restart?", C_TEXT, FONT_SMALL);
+            text_c(W / 2, y + 170, "your presets, state and MIDI map stay as they are", C_DIM, FONT_SMALL);
+            text_c(W / 2, y + h - 50, "A update and restart    B not now", C_TEXT, FONT_SMALL);
+        }
     }
     if (SDL_GetTicks() < toast_until) {
         int w = gfx_text_w(toast_msg, FONT_LARGE) + 40;
@@ -1935,6 +2192,17 @@ static void tour(const char *path)
     draw();
     shot(path, "learn");
     midi_learn = 0;
+    /* the update prompt, as if v9.9.9 were out */
+    {
+        UpdateStatus *u = update_status();
+        snprintf(u->latest, sizeof u->latest, "9.9.9");
+        u->state = UP_AVAILABLE;
+        upd_open = 1;
+        draw();
+        shot(path, "update");
+        upd_open = 0;
+        u->state = UP_IDLE;
+    }
     base = keep;
 }
 
@@ -1958,6 +2226,7 @@ int main(int argc, char **argv)
         if (d && *d) snprintf(app_dir, sizeof app_dir, "%s", d);
     }
     perf_init("TFX", "TrimFX " TFX_VERSION);
+    perf_before_stat(log_input);
     if (env_int("TFX_MLOCK", 1) && mlockall(MCL_CURRENT | MCL_FUTURE) != 0) perf_log("START", "could not lock memory");
     buffer = env_int("TFX_BUFFER", 512);
     if (buffer < 64 || buffer > 4096) buffer = 512;
@@ -1977,6 +2246,14 @@ int main(int argc, char **argv)
     build_live(0.f);
     publish(&live);
     midimap_load();
+    /* the self-updater: on by default on the TrimUI; TFX_UPDATE=0 (in launch.sh) turns it off,
+     * TFX_UPDATE=1 turns it on in a desktop build */
+#ifdef TFX_TRIMUI
+    upd_auto = !shot_path;
+#endif
+    if (getenv("TFX_UPDATE")) upd_auto = atoi(getenv("TFX_UPDATE")) != 0;
+    if (upd_auto) upd_net_init();
+    perf_log("UPDATE", "check %s (%s from %s)", upd_auto ? "on" : "off", update_asset(), UPD_REPO);
 
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_JOYSTICK) < 0) {
@@ -2010,6 +2287,7 @@ int main(int argc, char **argv)
     if (!is_pro) toast("NO STICKS HERE: KNOBS ONLY (OR A GAMEPAD)");
 
     audio_follow(1);
+    upd_next = SDL_GetTicks() + 5000;
 
     Uint32 last = SDL_GetTicks();
     while (running) {
@@ -2047,6 +2325,8 @@ int main(int argc, char **argv)
             }
         }
         repeats();
+        update_watch(t0);
+        if (hw_log_at && (Sint32)(t0 - hw_log_at) >= 0) hw_log_at = 0, log_hw();
         build_live(dt);
         publish(&live);
 
@@ -2094,5 +2374,5 @@ int main(int argc, char **argv)
     bi_switch_close();
     perf_close();
     SDL_Quit();
-    return 0;
+    return update_status()->state == UP_INSTALLED ? RELAUNCH_STATUS : 0; /* launch.sh starts the new version */
 }
