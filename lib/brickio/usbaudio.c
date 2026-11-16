@@ -754,7 +754,7 @@ int ua_tick(void)
                    ho * 1000.0 / RATE, ho * 1000.0 / RATE);
             else
                 lg("AUDIO", "DUPLEX holds %d frames out and %d in (%.1f + %.1f ms), the driver's queue included: round trip ~%.1f ms + the interface "
-                   "(%.1f periods; by design 3)", ho, hi, ho * 1000.0 / RATE, hi * 1000.0 / RATE, (ho + hi + fr) * 1000.0 / RATE,
+                   "(%.1f periods)", ho, hi, ho * 1000.0 / RATE, hi * 1000.0 / RATE, (ho + hi + fr) * 1000.0 / RATE,
                    (double)(ho + hi + fr) / fr);
         }
         if (now - last_out_check > 1500) {
