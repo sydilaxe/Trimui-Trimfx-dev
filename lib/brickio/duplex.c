@@ -128,14 +128,13 @@ fail:
     return -1;
 }
 
-/* both from the top: silence queued on the output, then both started together.
+/* both from the top: the output's buffer filled with silence, then both started together.
  *
- * With an input, the output starts with what it should hold when the input's first period comes in
- * (periods - 1), and prime() keeps it there until that period does come: a USB interface's input can
- * take longer than a period to start (the 1010music bluebox: tens of ms), and before, the output ran
- * dry waiting for it, which restarted both, which ran dry again: an endless string of restarts. Both
- * directions then run on the interface's one clock, so what is queued at the start is the latency for
- * good: prime() sets it the same every time (3 periods with 2 queued) instead of by chance. */
+ * With an input, prime() then keeps the output full until the input's first period comes in: a USB
+ * interface's input can take longer than the output's buffer to start (the 1010music bluebox: tens of
+ * ms), and before, the output ran dry waiting for it, which restarted both, which ran dry again: an
+ * endless string of restarts. The output starts full, as it always did (starting it lower, to save a
+ * period, left a full-speed interface's driver short at 128 frames and made it worse). */
 static int restart(void)
 {
     if (cap && linked) A.drop(cap);
@@ -144,7 +143,7 @@ static int restart(void)
         A.drop(play);
     }
     if (A.prepare(play) < 0 || (cap && A.prepare(cap) < 0)) return -1;
-    for (int k = 0; k < (cap ? periods - 1 : periods); k++)
+    for (int k = 0; k < periods; k++)
         if (A.writei(play, silence, (uframes)frames) < 0) return -1;
     prime_on = cap != NULL;
     if (cap && linked) return A.start(cap);
@@ -159,12 +158,14 @@ static uint64_t mono_ms(void)
     return (uint64_t)t.tv_sec * 1000u + (uint64_t)t.tv_nsec / 1000000u;
 }
 
-/* until the input's first period is in: the output topped up with silence, in quarter periods, to
- * periods - 1 queued (no more: more would stay as latency). 0 once the input is in, <0 an error (an
- * xrun: restart, as is a second with no input at all) */
+/* until the input's first period is in: the output kept from running dry, a quarter period of
+ * silence each time it falls below half a period. Only then: a start whose input comes in time runs
+ * exactly as before (each quarter added is a quarter period more latency, for good: both directions
+ * run on one clock). 0 once the input is in, <0 an error (an xrun: restart, as is a second with no
+ * input at all) */
 static int prime(void)
 {
-    const sframes want = (sframes)(periods - 1) * frames, step = frames >= 64 ? frames / 4 : frames;
+    const sframes want = frames / 2, step = frames >= 64 ? frames / 4 : frames;
     const uint64_t t0 = mono_ms();
     for (;;) {
         sframes ca = A.avail(cap);
@@ -172,7 +173,7 @@ static int prime(void)
         if (ca >= frames) return 0;
         sframes pa = A.avail(play);
         if (pa < 0) return (int)pa;
-        if ((sframes)out_size - pa < want) {
+        if (pa >= step && (sframes)out_size - pa < want) {
             sframes w = A.writei(play, silence, (uframes)step);
             if (w < 0) return (int)w;
             continue;

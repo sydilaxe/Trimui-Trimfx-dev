@@ -50,6 +50,14 @@ static int direct_in, direct_out, direct_off; /* DIRECT in use; off (by setting,
 static char direct_failed[128];
 /* DUPLEX: one USB interface both ways, run by duplex.c (no SDL streams, no cushion) */
 static int duplex_on, duplex_off, duplex_periods = 2;
+/* DUPLEX keeping a period more out, by itself: <app>_PERIODS unset, and the interface missing periods
+ * with 2 queued (6 in 10 s): a full-speed one (the bluebox) at 128 frames. For that card, at that buffer
+ * and below; kept in audio.txt (periods3@<card>=<frames>), so the next start needs no 10 s to find it */
+static int periods_env, dx_periods_now = 2;
+static char dx_more[48];
+static int dx_more_frames; /* ... at this buffer and below */
+static Uint32 dx_win_at;
+static unsigned dx_win_x;
 static char duplex_failed[48];                /* a card it failed on: the SDL path for it */
 static unsigned dx_seen_xruns;
 static Uint32 dx_held_at; /* when to log what DUPLEX really holds (0: done) */
@@ -561,7 +569,8 @@ static int start_duplex(const char *o, const char *i)
     atomic_store(&hw_period_a, 0), atomic_store(&last_call_ns, 0);
     if (atomic_load(&guard)) notes |= UA_NOTE_UNGUARD;
     atomic_store(&guard, 0);
-    DxConfig c = {.card = id, .ch_in = chi, .ch_out = cho, .frames = buffer, .periods = duplex_periods, .rate = rate_hz,
+    int per = !periods_env && *dx_more && !strcmp(dx_more, id) && buffer <= dx_more_frames ? 3 : duplex_periods;
+    DxConfig c = {.card = id, .ch_in = chi, .ch_out = cho, .frames = buffer, .periods = per, .rate = rate_hz,
                   .on_thread = dx_thread, .period = dx_period, .ud = NULL, .log = lg};
     if (dx_start(&c, err, sizeof err) < 0) {
         lg("AUDIO", "DUPLEX not possible on %s (%s): two streams instead", id, err);
@@ -574,6 +583,7 @@ static int start_duplex(const char *o, const char *i)
     atomic_store(&in_block, fr);
     atomic_store_explicit(&have_in, chi > 0, memory_order_release);
     dx_seen_xruns = 0;
+    dx_periods_now = per, dx_win_x = 0, dx_win_at = SDL_GetTicks() + 10000;
     dx_held_at = SDL_GetTicks() + 3000;
     if (!dx_held_at) dx_held_at = 1;
     if (chi > 0)
@@ -631,6 +641,7 @@ static void save(void)
     fprintf(f, "in=%s\nout=%s\nin_pair=%d\nout_pair=%d\nbuffer=%d\n", in_want, out_want, in_pair_want, out_pair_want, buf_global);
     for (int i = 0; i < NDEVBUF; i++)
         if (devbuf[i].id[0]) fprintf(f, "buffer@%s=%d\n", devbuf[i].id, devbuf[i].frames);
+    if (*dx_more && dx_more_frames > 0) fprintf(f, "periods3@%s=%d\n", dx_more, dx_more_frames);
     fclose(f);
     rename(tmp, cfg.settings);
 }
@@ -651,6 +662,8 @@ static void load(void)
         else if (!strcmp(line, "in_pair")) in_pair_want = atoi(v) & 3;
         else if (!strcmp(line, "out_pair")) out_pair_want = atoi(v) & 3;
         else if (!strcmp(line, "buffer")) buf_user = atoi(v);
+        else if (!strncmp(line, "periods3@", 9) && valid_buffer(atoi(v)))
+            snprintf(dx_more, sizeof dx_more, "%s", line + 9), dx_more_frames = atoi(v);
         else if (!strncmp(line, "buffer@", 7))
             for (int i = 0; i < NDEVBUF; i++)
                 if (!devbuf[i].id[0]) { snprintf(devbuf[i].id, sizeof devbuf[i].id, "%s", line + 7), devbuf[i].frames = atoi(v); break; }
@@ -683,6 +696,7 @@ void ua_start(const UaConfig *c)
     snprintf(envn, sizeof envn, "%s_PERIODS", cfg.app);
     e = getenv(envn);
     duplex_periods = e && atoi(e) >= 3 ? 3 : 2;
+    periods_env = e && *e;
     buffer_for(pick(0)); /* AUTO starts low (256): it matches the interface's period, and grows if it must */
     started = 1;
     follow(1);
@@ -745,6 +759,23 @@ int ua_tick(void)
             reopen("DUPLEX stopped");
             return (int)notes;
         }
+        /* missing periods with 2 queued: a period more, for this card (each is a dropout counted above) */
+        if (dx_periods_now < 3 && !periods_env && (Sint32)(now - dx_win_at) >= 0) {
+            unsigned xr = dx_xruns();
+            if (xr - dx_win_x >= 6) {
+                char was[48];
+                snprintf(was, sizeof was, "%s", dx_more);
+                card_id(out_name, dx_more, sizeof dx_more);
+                if (strcmp(was, dx_more) || dx_frames() > dx_more_frames) dx_more_frames = dx_frames();
+                save();
+                lg("AUDIO", "DUPLEX missed %u periods in 10 s with 2 queued: 3 queued from now on for %s at %d frames and below (a period more latency; "
+                   "%s_PERIODS=2 keeps 2)", xr - dx_win_x, *dx_more ? dx_more : "the interface", dx_frames(), cfg.app);
+                notes |= UA_NOTE_REOPEN;
+                reopen("the interface needs a period more");
+                return (int)notes;
+            }
+            dx_win_x = xr, dx_win_at = now + 10000;
+        }
         int ho, hi;
         if (dx_held_at && (Sint32)(now - dx_held_at) >= 0 && dx_held(&ho, &hi)) {
             dx_held_at = 0;
@@ -754,7 +785,7 @@ int ua_tick(void)
                    ho * 1000.0 / RATE, ho * 1000.0 / RATE);
             else
                 lg("AUDIO", "DUPLEX holds %d frames out and %d in (%.1f + %.1f ms), the driver's queue included: round trip ~%.1f ms + the interface "
-                   "(%.1f periods; by design 3)", ho, hi, ho * 1000.0 / RATE, hi * 1000.0 / RATE, (ho + hi + fr) * 1000.0 / RATE,
+                   "(%.1f periods)", ho, hi, ho * 1000.0 / RATE, hi * 1000.0 / RATE, (ho + hi + fr) * 1000.0 / RATE,
                    (double)(ho + hi + fr) / fr);
         }
         if (now - last_out_check > 1500) {
@@ -891,7 +922,7 @@ void ua_status(UaStatus *s)
     if (duplex_on) { /* a period in, what the output queues: no cushion */
         int fr = dx_frames();
         s->cushion = 0, s->margin = 0, s->drift_ppm = 0, s->exact = 1, s->slips = 0;
-        s->latency_ms = (float)fr * (float)(cfg.no_input ? duplex_periods : 1 + duplex_periods) * 1000.f / RATE; /* playback only: no period in */
+        s->latency_ms = (float)fr * (float)(cfg.no_input ? dx_periods_now : 1 + dx_periods_now) * 1000.f / RATE; /* playback only: no period in */
         int ho, hi; /* measured, once known: what each direction holds, the driver's queue included */
         if (dx_held(&ho, &hi)) s->latency_ms = (float)(cfg.no_input ? ho : ho + (hi > 0 ? hi : 0) + fr) * 1000.f / RATE;
         s->have_input = !cfg.no_input;
