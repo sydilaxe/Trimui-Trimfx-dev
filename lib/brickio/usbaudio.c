@@ -52,6 +52,7 @@ static char direct_failed[128];
 static int duplex_on, duplex_off, duplex_periods = 2;
 static char duplex_failed[48];                /* a card it failed on: the SDL path for it */
 static unsigned dx_seen_xruns;
+static Uint32 dx_held_at; /* when to log what DUPLEX really holds (0: done) */
 
 static void lg(const char *tag, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void lg(const char *tag, const char *fmt, ...)
@@ -573,6 +574,8 @@ static int start_duplex(const char *o, const char *i)
     atomic_store(&in_block, fr);
     atomic_store_explicit(&have_in, chi > 0, memory_order_release);
     dx_seen_xruns = 0;
+    dx_held_at = SDL_GetTicks() + 3000;
+    if (!dx_held_at) dx_held_at = 1;
     if (chi > 0)
         lg("AUDIO", "in + out: %s, %d / %d ch (pairs %d / %d), %d Hz, %d frames%s%s", keep_o, chi, cho, atomic_load(&in_pair) + 1,
            atomic_load(&out_pair) + 1, rate_hz, fr, *rates ? ", rates " : "", rates);
@@ -742,6 +745,18 @@ int ua_tick(void)
             reopen("DUPLEX stopped");
             return (int)notes;
         }
+        int ho, hi;
+        if (dx_held_at && (Sint32)(now - dx_held_at) >= 0 && dx_held(&ho, &hi)) {
+            dx_held_at = 0;
+            int fr = dx_frames();
+            if (cfg.no_input)
+                lg("AUDIO", "PLAYBACK holds %d frames out (%.1f ms), the driver's queue included: out in ~%.1f ms + the interface's converters", ho,
+                   ho * 1000.0 / RATE, ho * 1000.0 / RATE);
+            else
+                lg("AUDIO", "DUPLEX holds %d frames out and %d in (%.1f + %.1f ms), the driver's queue included: round trip ~%.1f ms + the interface "
+                   "(%.1f periods; by design 3)", ho, hi, ho * 1000.0 / RATE, hi * 1000.0 / RATE, (ho + hi + fr) * 1000.0 / RATE,
+                   (double)(ho + hi + fr) / fr);
+        }
         if (now - last_out_check > 1500) {
             if (atomic_load(&out_calls) == seen_out_calls) { notes |= UA_NOTE_REOPEN; reopen("the interface stopped"); return (int)notes; }
             seen_out_calls = atomic_load(&out_calls), last_out_check = now;
@@ -877,6 +892,8 @@ void ua_status(UaStatus *s)
         int fr = dx_frames();
         s->cushion = 0, s->margin = 0, s->drift_ppm = 0, s->exact = 1, s->slips = 0;
         s->latency_ms = (float)fr * (float)(cfg.no_input ? duplex_periods : 1 + duplex_periods) * 1000.f / RATE; /* playback only: no period in */
+        int ho, hi; /* measured, once known: what each direction holds, the driver's queue included */
+        if (dx_held(&ho, &hi)) s->latency_ms = (float)(cfg.no_input ? ho : ho + (hi > 0 ? hi : 0) + fr) * 1000.f / RATE;
         s->have_input = !cfg.no_input;
     }
 }

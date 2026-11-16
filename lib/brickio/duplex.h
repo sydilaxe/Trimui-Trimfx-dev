@@ -33,3 +33,7 @@ int dx_alive(void);           /* the thread is running (0 once the device has go
 int dx_frames(void);          /* the period the interface gave */
 unsigned dx_xruns(void);      /* periods missed since dx_start */
 unsigned dx_periods_done(void);
+/* what each direction holds now, in frames, the driver's own queue included (snd_pcm_delay, sampled
+ * every 64 periods): out, from a frame written to it being heard; in, frames come in but not yet
+ * read. 0 until known. Their sum plus a period is the round trip, the interface's converters apart */
+int dx_held(int *out, int *in);
