@@ -8,6 +8,9 @@
 #
 # It changes nothing that stays: it reads the kernel's files, and makes a test gadget
 # (/sys/kernel/config/usb_gadget/brickioprobe) that is never bound to the port and is removed at once.
+# Then probe-iso (built from tools/probe-iso.c, next to this script) tries isochronous endpoints:
+# that one binds its test gadget to the port for about a second, as the apps' clock link does at
+# every start, so unplug the bottom port while it runs.
 CFG=/sys/kernel/config/usb_gadget
 G=$CFG/brickioprobe
 
@@ -50,3 +53,13 @@ for f in uac2 uac1 midi ffs; do
 done
 rmdir "$G" 2>/dev/null
 [ -d "$G" ] && echo "note: $G is still there; remove it with: rmdir $G" || echo "test gadget removed"
+
+echo "== isochronous endpoints (what a standard USB audio device needs)"
+# probe-iso binds a test gadget to the port for a moment (as the apps' clock link does at every start):
+# unplug the bottom port first
+here=$(dirname "$0")
+if [ -x "$here/probe-iso" ]; then
+    "$here/probe-iso"
+else
+    echo "(no probe-iso next to this script)"
+fi
