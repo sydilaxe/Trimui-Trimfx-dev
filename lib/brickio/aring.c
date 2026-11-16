@@ -112,7 +112,8 @@ int ar_pull(ARing *r, float *dst, int frames, int in_block, uint64_t now_ns)
      * in bursts, so the level saw-tooths), steers the read rate. A critically damped PI loop: the
      * level moves 48000 frames a second per unit of rate, so Kp = 2 w / 48000, Ki = w^2 / 48000,
      * with w = 2 pi / 40 s: it settles in under a minute, too slowly to be heard as pitch */
-    double dt = (double)frames / 48000.0;
+    const double SR = r->rate > 0 ? (double)r->rate : 48000.0;
+    double dt = (double)frames / SR;
     r->calm += dt;
     /* calm: a little less latency, gently (an eighth of the margin, at least 16). One interface both
      * ways (one clock, one period) goes lower and sooner: to 32 frames, every 15 s */
@@ -125,13 +126,13 @@ int ar_pull(ARing *r, float *dst, int frames, int in_block, uint64_t now_ns)
     }
     /* the level as it would be with the input arriving smoothly: where the writer is by now, from
      * when it last wrote (at most a burst and a half on) */
-    double since = (double)(int64_t)(now_ns - atomic_load_explicit(&r->w_time, memory_order_relaxed)) * 48e-6;
+    double since = (double)(int64_t)(now_ns - atomic_load_explicit(&r->w_time, memory_order_relaxed)) * SR * 1e-9;
     if (since < 0) since = 0;
     if (since > 1.5 * in_block) since = 1.5 * in_block;
     double level = fill + since - 0.5 * in_block;
     r->avg += (level - r->avg) * (1.0 - exp(-dt / 1.0));
     double err = r->avg - target;
-    const double wn = 2.0 * 3.14159265358979 / 40.0, KP = 2.0 * wn / 48000.0, KI = wn * wn / 48000.0;
+    const double wn = 2.0 * 3.14159265358979 / 40.0, KP = 2.0 * wn / SR, KI = wn * wn / SR;
     r->integ += err * dt;
     double lim = MAX_DEV / KI;
     if (r->integ > lim) r->integ = lim;
@@ -165,7 +166,7 @@ int ar_pull(ARing *r, float *dst, int frames, int in_block, uint64_t now_ns)
             }
         }
         double drift = r->ex_net + (target - r->ex_tgt0);
-        if (r->ex_t > 15.0 && fabs(drift) > 100e-6 * 48000.0 * (r->ex_t - 5.0) + 16.0) r->resample = 1;
+        if (r->ex_t > 15.0 && fabs(drift) > 100e-6 * SR * (r->ex_t - 5.0) + 16.0) r->resample = 1;
     }
     r->ratio = 1.0 + dev;
     atomic_store_explicit(&r->ppm, (int)lrint(dev * 1e6), memory_order_relaxed);

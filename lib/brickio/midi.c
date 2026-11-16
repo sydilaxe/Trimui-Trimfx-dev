@@ -19,22 +19,31 @@
 #define MAXDEV 8
 #define QSIZE 1024 /* a power of two */
 
+#define SXMAX 64 /* the longest SysEx kept (the link position is 14 bytes; longer ones are passed by) */
+
 typedef struct {
     int fd, out; /* out: opened for writing too */
     char path[256], name[48];
     uint8_t status, d[2];
     int nd, sysex;
+    uint8_t sx[SXMAX];
+    int sxn; /* -1: too long, being skipped */
 } Dev;
 
 static Dev dev[MAXDEV];
 static int ndev;
-static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+/* recursive: the raw tap and the SysEx hook may send from inside the reader */
+static pthread_mutex_t lock = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
 static pthread_t thr;
 static atomic_int running;
 static char pat[256];
 static void (*wake_fn)(void);
 static MidiEv q[QSIZE];
 static atomic_uint qw, qr;
+static void (*raw_fn)(int, const uint8_t *, int, uint64_t, void *);
+static void *raw_ud;
+
+
 
 static uint64_t now_ns(void)
 {
@@ -100,10 +109,21 @@ static int parse(Dev *d, uint8_t b, MidiEv *e)
         default: return 0;
         }
     }
-    if (b == 0xf0) { d->sysex = 1; return 0; }
+    if (b == 0xf0) { d->sysex = 1, d->sx[0] = 0xf0, d->sxn = 1; return 0; }
+    if (b == 0xf7 && d->sysex) { /* a SysEx complete: 2 */
+        d->sysex = 0, d->status = 0;
+        if (d->sxn < 0 || d->sxn >= SXMAX) return 0;
+        d->sx[d->sxn++] = 0xf7;
+        return 2;
+    }
     if (b >= 0xf0) { d->sysex = 0; d->status = 0; return 0; }
     if (b & 0x80) { d->sysex = 0; d->status = b; d->nd = 0; return 0; }
-    if (d->sysex || !d->status) return 0;
+    if (d->sysex) {
+        if (d->sxn >= 0 && d->sxn < SXMAX - 1) d->sx[d->sxn++] = b;
+        else d->sxn = -1;
+        return 0;
+    }
+    if (!d->status) return 0;
     int hi = d->status & 0xf0, need = (hi == 0xc0 || hi == 0xd0) ? 1 : 2;
     d->d[d->nd++] = b;
     if (d->nd < need) return 0;
@@ -118,6 +138,24 @@ static int parse(Dev *d, uint8_t b, MidiEv *e)
     case 0xd0: case 0xa0: e->type = MIDI_TOUCH; if (hi == 0xd0) e->val = e->num, e->num = 0; return 1;
     }
     return 0;
+}
+
+/* (the lock held) */
+static void (*sysex_fn)(int, const uint8_t *, int, uint64_t, void *);
+static void *sysex_ud;
+
+void midi_set_sysex(void (*fn)(int dev, const uint8_t *msg, int n, uint64_t t_ns, void *ud), void *ud)
+{
+    pthread_mutex_lock(&lock);
+    sysex_fn = fn, sysex_ud = ud;
+    pthread_mutex_unlock(&lock);
+}
+
+void midi_set_raw(void (*fn)(int dev, const uint8_t *bytes, int n, uint64_t t_ns, void *ud), void *ud)
+{
+    pthread_mutex_lock(&lock);
+    raw_fn = fn, raw_ud = ud;
+    pthread_mutex_unlock(&lock);
 }
 
 static void *reader(void *arg)
@@ -143,9 +181,12 @@ static void *reader(void *arg)
             if (got < 0 && errno != EAGAIN && errno != EINTR) { drop(k); continue; }
             if ((pf[k].revents & (POLLERR | POLLHUP | POLLNVAL)) && got <= 0) { drop(k); continue; }
             uint64_t t = now_ns();
-            for (ssize_t i = 0; i < got; i++) {
+            if (got > 0 && raw_fn) raw_fn(k, buf, (int)got, t, raw_ud);
+            for (ssize_t i = 0; i < got && k < ndev; i++) {
                 MidiEv e;
-                if (!parse(&dev[k], buf[i], &e)) continue;
+                int r = parse(&dev[k], buf[i], &e);
+                if (r == 2) { if (sysex_fn) sysex_fn(k, dev[k].sx, dev[k].sxn, t, sysex_ud); continue; }
+                if (!r) continue;
                 e.t_ns = t;
                 unsigned w = atomic_load_explicit(&qw, memory_order_relaxed);
                 if (w - atomic_load_explicit(&qr, memory_order_acquire) >= QSIZE) continue; /* full: dropped */

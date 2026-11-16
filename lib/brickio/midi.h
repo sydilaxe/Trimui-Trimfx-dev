@@ -40,4 +40,14 @@ void midi_clock_out(float bpm);
 int midi_count(void);
 const char *midi_name(void);
 void midi_stop(void);
-#define midi_close midi_stop
+#define midi_close midi_stop /* the older name (TrimFX) */
+
+/* ---------------------------------------------------------------- for an app with its own MIDI code
+ * A raw MIDI port can be read by one opener only, so brickio opens the devices and an app that keeps
+ * its own parser takes the bytes from here: every byte read, as read, on the reader thread (copy them
+ * out; don't block). dev: which device (0..midi_count()-1). NULL stops it. midi_poll still works. */
+void midi_set_raw(void (*fn)(int dev, const uint8_t *bytes, int n, uint64_t t_ns, void *ud), void *ud);
+
+/* each complete SysEx (F0 ... F7, up to 64 bytes; longer ones are passed by), on the reader thread:
+ * e.g. the clock link's position message (linkpos.h) from a MIDI port. NULL stops it. */
+void midi_set_sysex(void (*fn)(int dev, const uint8_t *msg, int n, uint64_t t_ns, void *ud), void *ud);

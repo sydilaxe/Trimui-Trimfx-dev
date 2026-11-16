@@ -19,7 +19,8 @@
 #include "aring.h"
 #include "duplex.h"
 
-#define RATE 48000
+static int rate_hz = 48000; /* UaConfig.rate */
+#define RATE rate_hz
 #define MAXCH 8
 #define MAXFR 4096
 
@@ -100,13 +101,25 @@ void ua_pin(const char *app)
     const char *e = getenv(envn);
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     if ((e && *e == '0') || n < 3) return;
+    /* <app>_CORES=out,in chooses them (an app with threads of its own to place: see ua_cores) */
+    int oc = (int)n - 1, ic = (int)n - 2;
+    snprintf(envn, sizeof envn, "%s_CORES", app);
+    if ((e = getenv(envn)) && sscanf(e, "%d,%d", &oc, &ic) == 2 && (oc < 0 || oc >= n || ic < 0 || ic >= n || oc == ic)) oc = (int)n - 1, ic = (int)n - 2;
     cpu_set_t set;
     CPU_ZERO(&set);
-    for (int i = 0; i < n - 2; i++) CPU_SET(i, &set);
+    for (int i = 0; i < n; i++)
+        if (i != oc && i != ic) CPU_SET(i, &set);
     if (pthread_setaffinity_np(pthread_self(), sizeof set, &set) != 0) return;
-    out_core = (int)n - 1, in_core = (int)n - 2;
-    snprintf(pin_note, sizeof pin_note, "output thread on core %d, input thread on core %d, the rest on 0-%d (%s_PIN=0 turns this off)", out_core,
-             in_core, in_core - 1, app);
+    out_core = oc, in_core = ic;
+    snprintf(pin_note, sizeof pin_note, "output thread on core %d, input thread on core %d, the rest on the others (%s_PIN=0 turns this off)",
+             out_core, in_core, app);
+}
+
+int ua_cores(int *out, int *in)
+{
+    if (out) *out = out_core;
+    if (in) *in = in_core;
+    return out_core >= 0;
 }
 
 static void flush_denormals(void)
@@ -253,7 +266,8 @@ static void dx_period(const float *cap, float *play, int frames, void *ud)
     atomic_fetch_add_explicit(&out_calls, 1, memory_order_relaxed);
     int ch = atomic_load_explicit(&in_ch, memory_order_relaxed), a = atomic_load_explicit(&in_pair, memory_order_relaxed) * 2, b = a + 1, clips = 0;
     if (b >= ch) a = 0, b = ch > 1 ? 1 : 0; /* a pair the interface hasn't: the first; mono: both */
-    for (int i = 0; i < frames; i++) {
+    if (ch <= 0) memset(in, 0, sizeof(float) * 2 * (size_t)frames); /* playback only */
+    for (int i = 0; i < frames && ch > 0; i++) {
         float x = cap[i * ch + a], y = cap[i * ch + b];
         if (x != x) x = 0.f;
         if (y != y) y = 0.f;
@@ -261,7 +275,7 @@ static void dx_period(const float *cap, float *play, int frames, void *ud)
         in[2 * i] = x, in[2 * i + 1] = y;
     }
     if (clips) atomic_fetch_add_explicit(&ring.clips, (unsigned)clips, memory_order_relaxed);
-    cfg.process(in, out, frames, 1, cfg.ud);
+    cfg.process(in, out, frames, ch > 0, cfg.ud);
     lt_step(in, out, frames);
     int och = atomic_load_explicit(&out_ch, memory_order_relaxed);
     memset(play, 0, sizeof(float) * (size_t)frames * (size_t)och);
@@ -515,7 +529,13 @@ static void buffer_for(const char *dev)
 static int duplex_wanted(const char *o, const char *i)
 {
     const char *drv = SDL_GetCurrentAudioDriver();
-    if (duplex_off || !o || !i || !drv || strcmp(drv, "alsa") || !is_usb(o)) return 0;
+    if (duplex_off || !o || !drv || strcmp(drv, "alsa") || !is_usb(o)) return 0;
+    if (cfg.no_input) { /* playback only (a synth): the USB output straight, one thread */
+        char ido[48];
+        card_id(o, ido, sizeof ido);
+        return *ido && strcmp(ido, duplex_failed);
+    }
+    if (!i) return 0;
     char ido[48], idi[48];
     card_id(o, ido, sizeof ido);
     card_id(i, idi, sizeof idi);
@@ -525,14 +545,14 @@ static int duplex_wanted(const char *o, const char *i)
 static int start_duplex(const char *o, const char *i)
 {
     char keep_o[128], keep_i[128], id[48], rates[96], err[200];
-    snprintf(keep_o, sizeof keep_o, "%s", o), snprintf(keep_i, sizeof keep_i, "%s", i);
+    snprintf(keep_o, sizeof keep_o, "%s", o), snprintf(keep_i, sizeof keep_i, "%s", i ? i : "");
     if (out_dev) SDL_CloseAudioDevice(out_dev), out_dev = 0; /* the card is one stream each way: SDL's go first */
     if (in_dev) SDL_CloseAudioDevice(in_dev), in_dev = 0;
     atomic_store_explicit(&have_in, 0, memory_order_release);
     dx_stop();
     duplex_on = 0;
     card_id(keep_o, id, sizeof id);
-    int cho = native_channels(keep_o, 0, rates, sizeof rates), chi = native_channels(keep_i, 1, NULL, 0);
+    int cho = native_channels(keep_o, 0, rates, sizeof rates), chi = cfg.no_input ? 0 : native_channels(keep_i, 1, NULL, 0);
     atomic_store(&out_ch, cho), atomic_store(&in_ch, chi);
     atomic_store(&out_pair, out_pair_want * 2 + 1 < cho ? out_pair_want : 0);
     atomic_store(&in_pair, in_pair_want * 2 + 1 < chi ? in_pair_want : 0);
@@ -540,7 +560,8 @@ static int start_duplex(const char *o, const char *i)
     atomic_store(&hw_period_a, 0), atomic_store(&last_call_ns, 0);
     if (atomic_load(&guard)) notes |= UA_NOTE_UNGUARD;
     atomic_store(&guard, 0);
-    DxConfig c = {id, chi, cho, buffer, duplex_periods, dx_thread, dx_period, NULL, lg};
+    DxConfig c = {.card = id, .ch_in = chi, .ch_out = cho, .frames = buffer, .periods = duplex_periods, .rate = rate_hz,
+                  .on_thread = dx_thread, .period = dx_period, .ud = NULL, .log = lg};
     if (dx_start(&c, err, sizeof err) < 0) {
         lg("AUDIO", "DUPLEX not possible on %s (%s): two streams instead", id, err);
         snprintf(duplex_failed, sizeof duplex_failed, "%s", id);
@@ -550,10 +571,14 @@ static int start_duplex(const char *o, const char *i)
     snprintf(out_name, sizeof out_name, "%s", keep_o), snprintf(in_name, sizeof in_name, "%s", keep_i);
     int fr = dx_frames();
     atomic_store(&in_block, fr);
-    atomic_store_explicit(&have_in, 1, memory_order_release);
+    atomic_store_explicit(&have_in, chi > 0, memory_order_release);
     dx_seen_xruns = 0;
-    lg("AUDIO", "in + out: %s, %d / %d ch (pairs %d / %d), 48000 Hz, %d frames%s%s", keep_o, chi, cho, atomic_load(&in_pair) + 1,
-       atomic_load(&out_pair) + 1, fr, *rates ? ", rates " : "", rates);
+    if (chi > 0)
+        lg("AUDIO", "in + out: %s, %d / %d ch (pairs %d / %d), %d Hz, %d frames%s%s", keep_o, chi, cho, atomic_load(&in_pair) + 1,
+           atomic_load(&out_pair) + 1, rate_hz, fr, *rates ? ", rates " : "", rates);
+    else
+        lg("AUDIO", "out: %s, %d ch (pair %d), %d Hz, %d frames, float to the interface's own format%s%s", keep_o, cho, atomic_load(&out_pair) + 1,
+           rate_hz, fr, *rates ? ", rates " : "", rates);
     hw_at = SDL_GetTicks() + 1200;
     if (cfg.opened) cfg.opened(fr, keep_o);
     last_out_check = SDL_GetTicks();
@@ -564,9 +589,9 @@ static int start_duplex(const char *o, const char *i)
 static void follow(int force)
 {
     {
-        const char *o = pick(0), *i = pick(1);
+        const char *o = pick(0), *i = cfg.no_input ? NULL : pick(1);
         if (duplex_wanted(o, i)) {
-            if (!force && duplex_on && dx_alive() && !strcmp(o, out_name) && !strcmp(i, in_name)) return; /* as it is */
+            if (!force && duplex_on && dx_alive() && !strcmp(o, out_name) && !strcmp(i ? i : "", in_name)) return; /* as it is */
             if (!force && strcmp(o, out_name)) buffer_for(o), matched_period = 0;
             if (start_duplex(o, i)) return;
         }
@@ -577,7 +602,12 @@ static void follow(int force)
     if (out_changes && !force) buffer_for(o), matched_period = 0;
     if (out_changes) open_out(o);
     const char *i = pick(1);
-    if (force || out_changes || !in_dev || strcmp(i ? i : "", in_name)) open_in(i);
+    if (cfg.no_input) { /* playback only: no input opened at all */
+        if (in_dev) SDL_CloseAudioDevice(in_dev), in_dev = 0;
+        atomic_store_explicit(&have_in, 0, memory_order_release);
+        in_name[0] = 0;
+    } else if (force || out_changes || !in_dev || strcmp(i ? i : "", in_name))
+        open_in(i);
     /* one interface both ways, DIRECT: one clock, one period: a smaller cushion */
     char ido[48], idi[48];
     card_id(out_name, ido, sizeof ido);
@@ -629,7 +659,9 @@ static void load(void)
 void ua_start(const UaConfig *c)
 {
     cfg = *c;
+    rate_hz = c->rate == 44100 || c->rate == 88200 || c->rate == 96000 ? c->rate : 48000;
     ar_init(&ring);
+    ring.rate = rate_hz;
     ua_pin(cfg.app); /* (if the app didn't before SDL_Init) */
     if (*pin_note) lg("AUDIO", "%s", pin_note);
     load();
@@ -686,7 +718,7 @@ int ua_tick(void)
             return (int)notes;
         }
         if (pp > 0) atomic_store(&hw_period_a, (unsigned)pp);
-        if (pp > 0 && strstr(hw_out, " Hz") && !strstr(hw_out, " 48000 Hz"))
+        if (pp > 0 && strstr(hw_out, " Hz") && !strstr(hw_out, rate_hz == 44100 ? " 44100 Hz" : rate_hz == 88200 ? " 88200 Hz" : rate_hz == 96000 ? " 96000 Hz" : " 48000 Hz"))
             lg("HINT", "the interface plays at %s: the sound is converted. Set it to 48 kHz if it can", hw_out);
         if (!buf_user && !matched_period && pp > buffer && pp <= 2048) {
             matched_period = 1;
@@ -821,13 +853,14 @@ void ua_status(UaStatus *s)
     snprintf(s->in_name, sizeof s->in_name, "%s", in_dev || duplex_on ? (*in_name ? in_name : "DEFAULT") : "");
     snprintf(s->out_name, sizeof s->out_name, "%s", out_dev || duplex_on ? (*out_name ? out_name : "DEFAULT") : "");
     s->duplex = duplex_on;
+    s->rate = rate_hz;
     s->in_auto = !*in_want, s->out_auto = !*out_want;
     s->in_ch = atomic_load(&in_ch), s->out_ch = atomic_load(&out_ch);
     s->in_pair = atomic_load(&in_pair), s->out_pair = atomic_load(&out_pair);
     s->buffer = buffer, s->buffer_auto = !buf_user;
     s->guard = atomic_load(&guard);
     s->direct_in = (in_dev || duplex_on) && direct_in, s->direct_out = (out_dev || duplex_on) && direct_out;
-    s->have_input = in_dev != 0 || duplex_on;
+    s->have_input = in_dev != 0 || (duplex_on && !cfg.no_input);
     int ro = atomic_load(&rt_out), ri = atomic_load(&rt_in);
     s->rt = ro < 0 || ri < 0 ? -1 : ro > 0 ? 1 : 0;
     snprintf(s->hw_in, sizeof s->hw_in, "%s", hw_in);
@@ -843,6 +876,7 @@ void ua_status(UaStatus *s)
     if (duplex_on) { /* a period in, what the output queues: no cushion */
         int fr = dx_frames();
         s->cushion = 0, s->margin = 0, s->drift_ppm = 0, s->exact = 1, s->slips = 0;
-        s->latency_ms = (float)fr * (float)(1 + duplex_periods) * 1000.f / RATE;
+        s->latency_ms = (float)fr * (float)(cfg.no_input ? duplex_periods : 1 + duplex_periods) * 1000.f / RATE; /* playback only: no period in */
+        s->have_input = !cfg.no_input;
     }
 }

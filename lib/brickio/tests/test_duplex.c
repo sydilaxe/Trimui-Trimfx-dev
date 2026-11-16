@@ -17,7 +17,8 @@ static volatile int periods, bad_frames, threads;
 static void on_thread(void) { threads++; }
 static void period(const float *cap, float *play, int frames, void *ud)
 {
-    (void)cap, (void)ud;
+    (void)ud;
+    (void)cap; /* (NULL when playback only) */
     if (frames != 64) bad_frames++;
     for (int i = 0; i < frames * 2; i++) play[i] = 0.f;
     periods++;
@@ -38,7 +39,12 @@ int main(void)
     for (int round = 0; round < 2; round++) {
         char err[200] = "";
         periods = 0;
+        /* the second round as an app written before 0.1 sets it up (no rate: 48 kHz) */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers" /* on purpose: rate left out */
         DxConfig c = {"pcm:null", 2, 2, 64, 2, on_thread, period, NULL, lg};
+#pragma GCC diagnostic pop
+        if (!round) c.rate = 48000;
         int r = dx_start(&c, err, sizeof err);
         CHECK(r == 0, "round %d: starts on the null device (%s)", round, err);
         if (r) break;
@@ -51,8 +57,20 @@ int main(void)
         CHECK(!dx_alive(), "round %d: stopped", round);
     }
     CHECK(threads == 2, "the thread hook ran once a start (%d)", threads);
+    /* playback only (a synth): no input opened, the output's own pace; and at 96 kHz */
+    {
+        char err[200] = "";
+        periods = 0, bad_frames = 0;
+        DxConfig c = {"pcm:null", 0, 2, 64, 2, NULL, period, NULL, lg, 96000};
+        int r = dx_start(&c, err, sizeof err);
+        CHECK(r == 0, "playback only, 96 kHz: starts (%s)", err);
+        struct timespec ts = {0, 100 * 1000 * 1000};
+        nanosleep(&ts, NULL);
+        CHECK(r || periods > 0, "playback only: periods came through (%d)", periods);
+        dx_stop();
+    }
     char err[200] = "";
-    DxConfig bad = {"no-such-card-xyz", 2, 2, 64, 2, NULL, period, NULL, lg};
+    DxConfig bad = {"no-such-card-xyz", 2, 2, 64, 2, NULL, period, NULL, lg, 48000};
     CHECK(dx_start(&bad, err, sizeof err) < 0 && *err, "a card that isn't there fails cleanly (%s)", err);
     printf("\n%d checks, %d failed\n", checks, fails);
     return fails != 0;
