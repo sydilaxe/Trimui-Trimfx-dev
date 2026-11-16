@@ -122,7 +122,7 @@ build/$(NAME)-mustardos.muxapp: build/trimui/$(APP) $(shell find Apps/$(NAME) mu
 	cp $(MBED_DIR)/LICENSE build/mux/$(NAME)/LICENSE-mbedtls.txt # the binary carries Mbed TLS (the updater)
 	cp README.md build/mux/$(NAME)/README.md
 	echo $(VERSION) > build/mux/$(NAME)/VERSION
-	chmod +x build/mux/$(NAME)/launch.sh build/mux/$(NAME)/mux_launch.sh build/mux/$(NAME)/wake_screen.sh build/mux/$(NAME)/$(APP)
+	chmod +x build/mux/$(NAME)/launch.sh build/mux/$(NAME)/mux_launch.sh build/mux/$(NAME)/wake_screen.sh build/mux/$(NAME)/$(APP) build/mux/$(NAME)/probe-gadget.sh
 	cd build/mux && zip -qr ../$(NAME)-mustardos.muxapp $(NAME)
 	@echo "$@: copy it into ARCHIVE/ on the MustardOS card and install it from the Archive Manager"
 
