@@ -47,6 +47,7 @@ typedef struct {
     int slipping;             /* exact: stepping the level back to the target */
     int resample;             /* locked, but the clocks proved to differ: resample after all */
     double ex_t, ex_net, ex_tgt0; /* exact: seconds measured, frames slipped net, the target then */
+    int rate;                 /* frames a second (set by the owner before use; 0: 48000) */
     atomic_int locked;        /* set by the owner: input and output are one interface (one clock, one
                                * period): the cushion can be half an output buffer smaller */
 } ARing;

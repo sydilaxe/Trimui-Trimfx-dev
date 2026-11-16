@@ -31,18 +31,27 @@
 typedef struct {
     const char *app;   /* settings prefix: <app>_BUFFER, <app>_AUDIO, <app>_INPUT */
     int speaker_guard; /* 1: with no USB output, the internal speaker stays silent unless chosen */
-    /* the audio thread: stereo in (silence while there is none), stereo out, 48 kHz */
+    /* the audio thread: stereo in (silence while there is none), stereo out, at the rate below */
     void (*process)(const float *in, float *out, int frames, int have_input, void *ud);
     void *ud;
     void (*log)(const char *tag, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
     const char *settings; /* where to keep the choices (audio.txt), or NULL */
     /* optional: the output was (re)opened, with this many frames a callback (for the app's log) */
     void (*opened)(int frames, const char *device);
+    /* new in brickio 0.1 (0 keeps the old behaviour) */
+    int rate;          /* frames a second: 44100, 48000 (0: 48000), 88200 or 96000. On the direct path the
+                        * interface must run it (no resampling there): one that can't uses the SDL path */
+    int no_input;      /* 1: playback only (a synth): no input is opened, and a USB output runs straight
+                        * through ALSA from one real-time thread (duplex.c), float to the interface's own
+                        * 24- or 32-bit format at the very end */
 } UaConfig;
 
 /* first thing, before SDL_Init: the audio threads get cores of their own, and every thread started
  * from here on (SDL's own: its device watch, its video) keeps to the others. app: the settings prefix */
 void ua_pin(const char *app);
+/* the cores ua_pin gave the output and input threads (-1: none); 1 if pinned. An app with threads of
+ * its own to place (a render-ahead thread, say) keeps them off these. <app>_CORES=out,in chooses them */
+int ua_cores(int *out, int *in);
 /* after SDL_Init(SDL_INIT_AUDIO): opens the devices */
 void ua_start(const UaConfig *c);
 /* each SDL event (hot-plug) */
@@ -71,7 +80,9 @@ typedef struct {
     int buffer, buffer_auto;          /* frames */
     int guard;                        /* the speaker is being kept silent */
     int direct_in, direct_out;        /* opened through plughw, not the shared path */
-    int duplex;                       /* one interface both ways, one thread, no cushion (duplex.c) */
+    int duplex;                       /* the direct thread (duplex.c): one interface both ways, no cushion;
+                                       * with no_input, the output alone (have_input 0) */
+    int rate;                         /* frames a second */
     int have_input;
     int rt;                           /* the audio threads: 1 real-time, -1 refused, 0 not yet */
     char hw_in[64], hw_out[64];       /* "S24_3LE 48000 Hz 2 ch, period 1024" */

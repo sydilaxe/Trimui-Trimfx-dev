@@ -1,8 +1,15 @@
 # brickio: USB audio and MIDI for the TrimUI Brick and Brick Pro
 
 A small package for the sydilaxe TrimUI apps on MustardOS: USB audio interfaces and USB MIDI devices,
-low latency, resilient, cheap on the processor. TrimFX uses it first; Conduit and the others can take it
-as it is. C on SDL2 and the kernel's ALSA files; nothing else to ship. GPL-3.0-or-later.
+low latency, resilient, cheap on the processor. C on SDL2 and the kernel's ALSA files; nothing else to
+ship. GPL-3.0-or-later.
+
+**This folder is a copy of [brickio](https://github.com/sydilaxe/Brickio-dev)'s `src/`** (which version:
+`BRICKIO_VERSION`). Change brickio, not these files, then bring it in again from this repository:
+`sh <brickio>/tools/brickio-sync.sh <tag>`. TrimFX compiles four of its modules (the Makefile's
+`BRICKIO`); the others (`link`, `mclock`, `blink`, `perflog`, ...) come with the copy and aren't built
+yet. TrimFX keeps its own `src/perflog.c/h` for now: its dropout count differs from brickio's, and one
+will be chosen from a Brick's logs. The two tests below are brickio's, with their includes pointed here.
 
 | File | What |
 |---|---|

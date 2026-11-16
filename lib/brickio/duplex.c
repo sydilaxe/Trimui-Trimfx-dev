@@ -90,18 +90,18 @@ static atomic_uint xruns, done;
  * interface that can't do 48 kHz stays on the SDL path, whose conversion is better), period;
  * the buffer: the output's kept to what it queues, the input's roomier (it costs no latency:
  * each period is read the moment it is in) */
-static int setup(snd_pcm_t *p, int ch, uframes *period, uframes buffer, char *err, int n, const char *what)
+static int setup(snd_pcm_t *p, int ch, unsigned want_rate, uframes *period, uframes buffer, char *err, int n, const char *what)
 {
     snd_pcm_hw_params_t *hw = NULL;
     snd_pcm_sw_params_t *sw = NULL;
-    unsigned rate = 48000;
+    unsigned rate = want_rate;
     int dir = 0, e;
     uframes buf = buffer;
     if ((e = A.hw_malloc(&hw)) < 0) goto fail;
     if ((e = A.hw_any(p, hw)) < 0 || (e = A.hw_access(p, hw, ACCESS_RW_INTERLEAVED)) < 0 || (e = A.hw_format(p, hw, FORMAT_FLOAT_LE)) < 0 ||
         (e = A.hw_channels(p, hw, (unsigned)ch)) < 0 || (e = A.hw_resample(p, hw, 0)) < 0 || (e = A.hw_rate(p, hw, &rate, &dir)) < 0)
         goto fail;
-    if (rate != 48000) { snprintf(err, (size_t)n, "%s: the interface runs %u Hz, not 48000", what, rate); A.hw_free(hw); return -1; }
+    if (rate != want_rate) { snprintf(err, (size_t)n, "%s: the interface runs %u Hz, not %u", what, rate, want_rate); A.hw_free(hw); return -1; }
     if ((e = A.hw_period(p, hw, period, &dir)) < 0 || (e = A.hw_buffer(p, hw, &buf)) < 0 || (e = A.hw_apply(p, hw)) < 0) goto fail;
     A.hw_get_period(hw, period, &dir);
     A.hw_free(hw), hw = NULL;
@@ -121,14 +121,17 @@ fail:
 /* both from the top: silence queued on the output, then both started together */
 static int restart(void)
 {
-    if (linked) A.drop(cap);
-    else A.drop(cap), A.drop(play);
-    if (A.prepare(play) < 0 || A.prepare(cap) < 0) return -1;
+    if (cap && linked) A.drop(cap);
+    else {
+        if (cap) A.drop(cap);
+        A.drop(play);
+    }
+    if (A.prepare(play) < 0 || (cap && A.prepare(cap) < 0)) return -1;
     for (int k = 0; k < periods; k++)
         if (A.writei(play, silence, (uframes)frames) < 0) return -1;
-    if (linked) return A.start(cap);
-    A.start(play);
-    return A.start(cap);
+    if (cap && linked) return A.start(cap);
+    int e = A.start(play);
+    return cap ? A.start(cap) : e;
 }
 
 static int gone(int e) { return e == -ENODEV || e == -EBADFD || e == -EIO || e == -ENOENT; }
@@ -138,9 +141,9 @@ static void *loop(void *arg)
     (void)arg;
     if (cfg.on_thread) cfg.on_thread();
     while (atomic_load_explicit(&run, memory_order_relaxed)) {
-        /* a whole period in */
+        /* a whole period in (playback only: none; the output's own pace times the loop) */
         int got = 0, e = 0;
-        while (got < frames) {
+        while (cap && got < frames) {
             sframes r = A.readi(cap, cbuf + (size_t)got * (size_t)cfg.ch_in, (uframes)(frames - got));
             if (r < 0) { e = (int)r; break; }
             got += (int)r;
@@ -188,19 +191,22 @@ int dx_start(const DxConfig *c, char *err, int n)
     else snprintf(dev, sizeof dev, "plughw:CARD=%s,DEV=0", c->card);
     int e;
     if ((e = A.open(&play, dev, ST_PLAYBACK, 0)) < 0) { snprintf(err, (size_t)n, "output %s: %s", dev, A.strerror(e)); play = NULL; close_all(); return -1; }
-    if ((e = A.open(&cap, dev, ST_CAPTURE, 0)) < 0) { snprintf(err, (size_t)n, "input %s: %s", dev, A.strerror(e)); cap = NULL; close_all(); return -1; }
+    if (c->ch_in > 0 && (e = A.open(&cap, dev, ST_CAPTURE, 0)) < 0) { snprintf(err, (size_t)n, "input %s: %s", dev, A.strerror(e)); cap = NULL; close_all(); return -1; }
+    unsigned rate = c->rate > 0 ? (unsigned)c->rate : 48000u;
     uframes pp = (uframes)c->frames, cp = (uframes)c->frames;
-    if (setup(play, c->ch_out, &pp, pp * (uframes)periods, err, n, "output") < 0 || setup(cap, c->ch_in, &cp, cp * 8, err, n, "input") < 0) {
+    if (setup(play, c->ch_out, rate, &pp, pp * (uframes)periods, err, n, "output") < 0 ||
+        (cap && setup(cap, c->ch_in, rate, &cp, cp * 8, err, n, "input") < 0)) {
         close_all();
         return -1;
     }
+    if (!cap) cp = pp;
     if (pp != cp) { snprintf(err, (size_t)n, "the periods differ (output %lu, input %lu)", pp, cp); close_all(); return -1; }
     frames = (int)pp;
-    cbuf = calloc((size_t)frames * (size_t)c->ch_in, sizeof(float));
+    cbuf = calloc((size_t)frames * (size_t)(c->ch_in > 0 ? c->ch_in : 1), sizeof(float));
     pbuf = calloc((size_t)frames * (size_t)c->ch_out, sizeof(float));
     silence = calloc((size_t)frames * (size_t)c->ch_out, sizeof(float));
     if (!cbuf || !pbuf || !silence) { snprintf(err, (size_t)n, "out of memory"); close_all(); return -1; }
-    linked = A.link(cap, play) == 0;
+    linked = cap && A.link(cap, play) == 0;
     atomic_store(&xruns, 0), atomic_store(&done, 0);
     if (restart() < 0) { snprintf(err, (size_t)n, "could not start the streams"); close_all(); return -1; }
     atomic_store(&run, 1), atomic_store(&alive, 1);
@@ -212,8 +218,14 @@ int dx_start(const DxConfig *c, char *err, int n)
         return -1;
     }
     if (cfg.log)
-        cfg.log("AUDIO", "DUPLEX on %s: %d frames a period, %d queued out, %s; round trip ~%.1f ms + the interface", dev, frames, periods,
-                linked ? "linked (one start)" : "not linked", (double)frames * (1 + periods) * 1000.0 / 48000.0);
+    {
+        if (cap)
+            cfg.log("AUDIO", "DUPLEX on %s: %u Hz, %d frames a period, %d queued out, %s; round trip ~%.1f ms + the interface", dev, rate, frames,
+                    periods, linked ? "linked (one start)" : "not linked", (double)frames * (1 + periods) * 1000.0 / rate);
+        else
+            cfg.log("AUDIO", "PLAYBACK on %s: %u Hz, %d frames a period, %d queued; out in ~%.1f ms + the interface", dev, rate, frames, periods,
+                    (double)frames * periods * 1000.0 / rate);
+    }
     return 0;
 }
 
