@@ -24,8 +24,16 @@ export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/lib"
 # export TFX_LED_BAR=meter      # top bar: the output level meter instead of the chain
 # export TFX_LOG=2              # a status line every second in log.txt, and every button press
 # export TFX_PIN=0              # let the audio threads run on any core (by default: output on core 3, input on core 2)
+# export TFX_PROBE=0            # don't run the one-time USB port probe (probe.txt)
 # export TFX_UPDATE=0           # never check GitHub for a new version (an update replaces this file:
 #                               #   set it again after)
+
+# once, before the app: what the bottom USB port can be as a USB device, for Brick-to-Brick audio
+# (brickio). It reads the kernel's files and makes a test that is never bound to the port; the result is
+# probe.txt in this folder (send it). Delete probe.txt to run it again; TFX_PROBE=0 skips it.
+if [ "${TFX_PROBE:-1}" != 0 ] && [ ! -f probe.txt ] && [ -f probe-gadget.sh ]; then
+    sh probe-gadget.sh > probe.txt 2>&1
+fi
 
 # exit status 75: the app has just updated itself, so start the new version
 while :; do
