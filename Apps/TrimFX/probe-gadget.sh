@@ -8,6 +8,9 @@
 #
 # It changes nothing that stays: it reads the kernel's files, and makes a test gadget
 # (/sys/kernel/config/usb_gadget/brickioprobe) that is never bound to the port and is removed at once.
+# Then probe-iso (built from tools/probe-iso.c, next to this script) tries isochronous endpoints:
+# that one binds its test gadget to the port for about a second, as the apps' clock link does at
+# every start, so unplug the bottom port while it runs.
 CFG=/sys/kernel/config/usb_gadget
 G=$CFG/brickioprobe
 
@@ -39,14 +42,29 @@ if [ ! -d "$CFG" ]; then
     exit 0
 fi
 mkdir "$G" 2>/dev/null || { echo "can't make a test gadget (not root?)"; exit 0; }
-for f in uac2 uac1 midi ffs; do
+# each step says what it is about to do first, so a step that hangs shows in probe.txt.
+# Not ffs: the apps' clock link already uses it, and a bare FunctionFS instance made and removed
+# without being mounted hung a Brick's kernel (4.9) on its removal. probe-iso tests it the way the
+# clock link sets it up and takes it down (mounted, then unmounted, then removed).
+for f in uac2 uac1 midi; do
     if mkdir "$G/functions/$f.probe" 2>/dev/null; then
         echo "$f: AVAILABLE"
-        ls "$G/functions/$f.probe" | tr '\n' ' '; echo
-        rmdir "$G/functions/$f.probe"
+        echo "  removing the $f test..."
+        rmdir "$G/functions/$f.probe" && echo "  removed" || echo "  couldn't remove it"
     else
         echo "$f: not available"
     fi
 done
+echo "removing the test gadget..."
 rmdir "$G" 2>/dev/null
 [ -d "$G" ] && echo "note: $G is still there; remove it with: rmdir $G" || echo "test gadget removed"
+
+echo "== isochronous endpoints (what a standard USB audio device needs)"
+# probe-iso binds a test gadget to the port for a moment (as the apps' clock link does at every start):
+# unplug the bottom port first
+here=$(dirname "$0")
+if [ -x "$here/probe-iso" ]; then
+    "$here/probe-iso"
+else
+    echo "(no probe-iso next to this script)"
+fi

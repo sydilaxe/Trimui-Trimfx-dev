@@ -108,21 +108,27 @@ shots: build/desktop/$(APP)
 	@mkdir -p build/shots
 	SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy TFX_SHOT=build/shots/trimfx TFX_DIR=build build/desktop/$(APP)
 
+# the USB port probe's isochronous test (probe-gadget.sh runs it; brickio's tools/probe-iso.c)
+build/trimui/probe-iso: tools/probe-iso.c
+	@mkdir -p build/trimui
+	$(DEV_CC) -std=gnu11 -O2 -Wall -Wextra -o $@ $< -s
+
 # --- the MustardOS package: <Name>/ with the binary, launch.sh, mux_launch.sh, wake_screen.sh, the glyph
 package: build/$(NAME)-mustardos.muxapp
-build/$(NAME)-mustardos.muxapp: build/trimui/$(APP) $(shell find Apps/$(NAME) mustardos -type f) LICENSE README.md $(MBED_SRC)
+build/$(NAME)-mustardos.muxapp: build/trimui/$(APP) build/trimui/probe-iso $(shell find Apps/$(NAME) mustardos -type f) LICENSE README.md $(MBED_SRC)
 	rm -rf build/mux $@
 	mkdir -p build/mux/$(NAME)
 	cp -r Apps/$(NAME)/. build/mux/$(NAME)/
 	cp -r mustardos/. build/mux/$(NAME)/
 	rm -f build/mux/$(NAME)/state.txt build/mux/$(NAME)/log.txt build/mux/$(NAME)/midimap.txt build/mux/$(NAME)/audio.txt build/mux/$(NAME)/presets/slot*.txt
 	cp build/trimui/$(APP) build/mux/$(NAME)/$(APP)
+	cp build/trimui/probe-iso build/mux/$(NAME)/probe-iso
 	cp LICENSE build/mux/$(NAME)/LICENSE.txt
 	cp src/master/LICENSE-SP1Master.txt build/mux/$(NAME)/
 	cp $(MBED_DIR)/LICENSE build/mux/$(NAME)/LICENSE-mbedtls.txt # the binary carries Mbed TLS (the updater)
 	cp README.md build/mux/$(NAME)/README.md
 	echo $(VERSION) > build/mux/$(NAME)/VERSION
-	chmod +x build/mux/$(NAME)/launch.sh build/mux/$(NAME)/mux_launch.sh build/mux/$(NAME)/wake_screen.sh build/mux/$(NAME)/$(APP) build/mux/$(NAME)/probe-gadget.sh
+	chmod +x build/mux/$(NAME)/launch.sh build/mux/$(NAME)/mux_launch.sh build/mux/$(NAME)/wake_screen.sh build/mux/$(NAME)/$(APP) build/mux/$(NAME)/probe-gadget.sh build/mux/$(NAME)/probe-iso
 	cd build/mux && zip -qr ../$(NAME)-mustardos.muxapp $(NAME)
 	@echo "$@: copy it into ARCHIVE/ on the MustardOS card and install it from the Archive Manager"
 
