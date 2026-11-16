@@ -7,9 +7,11 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* ---------------------------------------------------------------- libasound, loaded at run time */
 typedef struct snd_pcm snd_pcm_t;
@@ -49,6 +51,9 @@ static struct {
     int (*unlink)(snd_pcm_t *);
     sframes (*readi)(snd_pcm_t *, void *, uframes);
     sframes (*writei)(snd_pcm_t *, const void *, uframes);
+    sframes (*avail)(snd_pcm_t *);
+    int (*delay)(snd_pcm_t *, sframes *);
+    int (*wait)(snd_pcm_t *, int);
     const char *(*strerror)(int);
 } A;
 
@@ -71,6 +76,7 @@ static int load(char *err, int n)
     SYM(prepare, "snd_pcm_prepare") SYM(start, "snd_pcm_start") SYM(drop, "snd_pcm_drop")
     SYM(link, "snd_pcm_link") SYM(unlink, "snd_pcm_unlink")
     SYM(readi, "snd_pcm_readi") SYM(writei, "snd_pcm_writei") SYM(strerror, "snd_strerror")
+    SYM(avail, "snd_pcm_avail") SYM(delay, "snd_pcm_delay") SYM(wait, "snd_pcm_wait")
 #undef SYM
     A.lib = l;
     return 0;
@@ -85,12 +91,15 @@ static pthread_t thr;
 static int thr_on;
 static atomic_int run, alive;
 static atomic_uint xruns, done;
+static atomic_int out_held = -1, in_held = -1; /* frames waiting in each direction, the driver's included */
+static uframes out_size;                     /* the output's buffer as the interface gave it */
+static int prime_on;                         /* after a start: the output kept fed until the input comes */
 
 /* one direction: float, the interface's channels, 48 kHz exactly (no resampling here: an
  * interface that can't do 48 kHz stays on the SDL path, whose conversion is better), period;
  * the buffer: the output's kept to what it queues, the input's roomier (it costs no latency:
  * each period is read the moment it is in) */
-static int setup(snd_pcm_t *p, int ch, unsigned want_rate, uframes *period, uframes buffer, char *err, int n, const char *what)
+static int setup(snd_pcm_t *p, int ch, unsigned want_rate, uframes *period, uframes buffer, uframes *got_buffer, char *err, int n, const char *what)
 {
     snd_pcm_hw_params_t *hw = NULL;
     snd_pcm_sw_params_t *sw = NULL;
@@ -104,6 +113,7 @@ static int setup(snd_pcm_t *p, int ch, unsigned want_rate, uframes *period, ufra
     if (rate != want_rate) { snprintf(err, (size_t)n, "%s: the interface runs %u Hz, not %u", what, rate, want_rate); A.hw_free(hw); return -1; }
     if ((e = A.hw_period(p, hw, period, &dir)) < 0 || (e = A.hw_buffer(p, hw, &buf)) < 0 || (e = A.hw_apply(p, hw)) < 0) goto fail;
     A.hw_get_period(hw, period, &dir);
+    if (got_buffer) A.hw_get_buffer(hw, got_buffer);
     A.hw_free(hw), hw = NULL;
     if ((e = A.sw_malloc(&sw)) < 0 || (e = A.sw_current(p, sw)) < 0) goto fail;
     A.sw_start(p, sw, (uframes)1 << 30); /* never by itself: dx starts both together */
@@ -118,7 +128,14 @@ fail:
     return -1;
 }
 
-/* both from the top: silence queued on the output, then both started together */
+/* both from the top: silence queued on the output, then both started together.
+ *
+ * With an input, the output starts with what it should hold when the input's first period comes in
+ * (periods - 1), and prime() keeps it there until that period does come: a USB interface's input can
+ * take longer than a period to start (the 1010music bluebox: tens of ms), and before, the output ran
+ * dry waiting for it, which restarted both, which ran dry again: an endless string of restarts. Both
+ * directions then run on the interface's one clock, so what is queued at the start is the latency for
+ * good: prime() sets it the same every time (3 periods with 2 queued) instead of by chance. */
 static int restart(void)
 {
     if (cap && linked) A.drop(cap);
@@ -127,11 +144,43 @@ static int restart(void)
         A.drop(play);
     }
     if (A.prepare(play) < 0 || (cap && A.prepare(cap) < 0)) return -1;
-    for (int k = 0; k < periods; k++)
+    for (int k = 0; k < (cap ? periods - 1 : periods); k++)
         if (A.writei(play, silence, (uframes)frames) < 0) return -1;
+    prime_on = cap != NULL;
     if (cap && linked) return A.start(cap);
     int e = A.start(play);
     return cap ? A.start(cap) : e;
+}
+
+static uint64_t mono_ms(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000u + (uint64_t)t.tv_nsec / 1000000u;
+}
+
+/* until the input's first period is in: the output topped up with silence, in quarter periods, to
+ * periods - 1 queued (no more: more would stay as latency). 0 once the input is in, <0 an error (an
+ * xrun: restart, as is a second with no input at all) */
+static int prime(void)
+{
+    const sframes want = (sframes)(periods - 1) * frames, step = frames >= 64 ? frames / 4 : frames;
+    const uint64_t t0 = mono_ms();
+    for (;;) {
+        sframes ca = A.avail(cap);
+        if (ca < 0) return (int)ca;
+        if (ca >= frames) return 0;
+        sframes pa = A.avail(play);
+        if (pa < 0) return (int)pa;
+        if ((sframes)out_size - pa < want) {
+            sframes w = A.writei(play, silence, (uframes)step);
+            if (w < 0) return (int)w;
+            continue;
+        }
+        if (!atomic_load_explicit(&run, memory_order_relaxed)) return -EINTR; /* dx_stop */
+        if (mono_ms() - t0 > 1000) return -EPIPE;
+        A.wait(cap, 1);
+    }
 }
 
 static int gone(int e) { return e == -ENODEV || e == -EBADFD || e == -EIO || e == -ENOENT; }
@@ -140,10 +189,16 @@ static void *loop(void *arg)
 {
     (void)arg;
     if (cfg.on_thread) cfg.on_thread();
+    unsigned n = 0;
     while (atomic_load_explicit(&run, memory_order_relaxed)) {
-        /* a whole period in (playback only: none; the output's own pace times the loop) */
         int got = 0, e = 0;
-        while (cap && got < frames) {
+        if (prime_on) {
+            prime_on = 0;
+            e = prime();
+            if (e == -EINTR || e == -EAGAIN) prime_on = 1; /* again, unless stopping */
+        }
+        /* a whole period in (playback only: none; the output's own pace times the loop) */
+        while (!e && cap && got < frames) {
             sframes r = A.readi(cap, cbuf + (size_t)got * (size_t)cfg.ch_in, (uframes)(frames - got));
             if (r < 0) { e = (int)r; break; }
             got += (int)r;
@@ -165,6 +220,11 @@ static void *loop(void *arg)
             continue;
         }
         atomic_fetch_add_explicit(&done, 1, memory_order_relaxed);
+        if ((n++ & 63) == 0) { /* now and then: what each direction holds, for the log */
+            sframes d;
+            if (A.delay(play, &d) == 0) atomic_store_explicit(&out_held, (int)d, memory_order_relaxed);
+            if (cap && A.delay(cap, &d) == 0) atomic_store_explicit(&in_held, (int)d, memory_order_relaxed);
+        }
     }
     atomic_store(&alive, 0);
     return NULL;
@@ -194,20 +254,22 @@ int dx_start(const DxConfig *c, char *err, int n)
     if (c->ch_in > 0 && (e = A.open(&cap, dev, ST_CAPTURE, 0)) < 0) { snprintf(err, (size_t)n, "input %s: %s", dev, A.strerror(e)); cap = NULL; close_all(); return -1; }
     unsigned rate = c->rate > 0 ? (unsigned)c->rate : 48000u;
     uframes pp = (uframes)c->frames, cp = (uframes)c->frames;
-    if (setup(play, c->ch_out, rate, &pp, pp * (uframes)periods, err, n, "output") < 0 ||
-        (cap && setup(cap, c->ch_in, rate, &cp, cp * 8, err, n, "input") < 0)) {
+    out_size = 0;
+    if (setup(play, c->ch_out, rate, &pp, pp * (uframes)periods, &out_size, err, n, "output") < 0 ||
+        (cap && setup(cap, c->ch_in, rate, &cp, cp * 8, NULL, err, n, "input") < 0)) {
         close_all();
         return -1;
     }
     if (!cap) cp = pp;
     if (pp != cp) { snprintf(err, (size_t)n, "the periods differ (output %lu, input %lu)", pp, cp); close_all(); return -1; }
     frames = (int)pp;
+    if (!out_size) out_size = pp * (uframes)periods;
     cbuf = calloc((size_t)frames * (size_t)(c->ch_in > 0 ? c->ch_in : 1), sizeof(float));
     pbuf = calloc((size_t)frames * (size_t)c->ch_out, sizeof(float));
     silence = calloc((size_t)frames * (size_t)c->ch_out, sizeof(float));
     if (!cbuf || !pbuf || !silence) { snprintf(err, (size_t)n, "out of memory"); close_all(); return -1; }
     linked = cap && A.link(cap, play) == 0;
-    atomic_store(&xruns, 0), atomic_store(&done, 0);
+    atomic_store(&xruns, 0), atomic_store(&done, 0), atomic_store(&out_held, -1), atomic_store(&in_held, -1);
     if (restart() < 0) { snprintf(err, (size_t)n, "could not start the streams"); close_all(); return -1; }
     atomic_store(&run, 1), atomic_store(&alive, 1);
     if (pthread_create(&thr, NULL, loop, NULL) == 0) thr_on = 1;
@@ -243,3 +305,10 @@ int dx_alive(void) { return atomic_load(&alive); }
 int dx_frames(void) { return frames; }
 unsigned dx_xruns(void) { return atomic_load(&xruns); }
 unsigned dx_periods_done(void) { return atomic_load_explicit(&done, memory_order_relaxed); }
+int dx_held(int *out, int *in)
+{
+    int o = atomic_load_explicit(&out_held, memory_order_relaxed), i = atomic_load_explicit(&in_held, memory_order_relaxed);
+    if (out) *out = o;
+    if (in) *in = i;
+    return o >= 0;
+}
