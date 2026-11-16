@@ -31,8 +31,14 @@ export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/lib"
 # once, before the app: what the bottom USB port can be as a USB device, for Brick-to-Brick audio
 # (brickio). It reads the kernel's files and makes a test that is never bound to the port; the result is
 # probe.txt in this folder (send it). Delete probe.txt to run it again; TFX_PROBE=0 skips it.
+# It gets 15 s at most: if it hangs, it is stopped and the app starts all the same.
 if [ "${TFX_PROBE:-1}" != 0 ] && [ ! -f probe.txt ] && [ -f probe-gadget.sh ]; then
-    sh probe-gadget.sh > probe.txt 2>&1
+    sh probe-gadget.sh > probe.txt 2>&1 &
+    probe=$!
+    ( sleep 15; kill "$probe" 2>/dev/null && echo "(stopped after 15 s: the step above hung)" >> probe.txt ) &
+    watch=$!
+    wait "$probe" 2>/dev/null
+    kill "$watch" 2>/dev/null
 fi
 
 # exit status 75: the app has just updated itself, so start the new version

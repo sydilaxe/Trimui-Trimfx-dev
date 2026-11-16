@@ -42,15 +42,17 @@ if [ ! -d "$CFG" ]; then
     exit 0
 fi
 mkdir "$G" 2>/dev/null || { echo "can't make a test gadget (not root?)"; exit 0; }
+# each step says what it is about to do first, so a step that hangs shows in probe.txt
 for f in uac2 uac1 midi ffs; do
     if mkdir "$G/functions/$f.probe" 2>/dev/null; then
         echo "$f: AVAILABLE"
-        ls "$G/functions/$f.probe" | tr '\n' ' '; echo
-        rmdir "$G/functions/$f.probe"
+        echo "  removing the $f test..."
+        rmdir "$G/functions/$f.probe" && echo "  removed" || echo "  couldn't remove it"
     else
         echo "$f: not available"
     fi
 done
+echo "removing the test gadget..."
 rmdir "$G" 2>/dev/null
 [ -d "$G" ] && echo "note: $G is still there; remove it with: rmdir $G" || echo "test gadget removed"
 
