@@ -47,41 +47,60 @@ static void teardown(void)
     rmdir(G);
 }
 
-/* one interface, an isochronous endpoint each way (asynchronous, 48 kHz stereo 24-bit and some:
- * 294 bytes a millisecond); full speed (1 ms) and high speed (bInterval 4: 1 ms) */
+/* a variant to try: which endpoints, what kind, how big */
 typedef struct {
-    struct usb_interface_descriptor intf;
-    struct usb_endpoint_descriptor_no_audio out, in;
-} __attribute__((packed)) Descs;
+    const char *what;
+    int out, in;  /* an endpoint that way (1) or not (0) */
+    int iso;      /* 1 isochronous, 0 bulk (the control: the clock link's kind) */
+    int size;     /* bytes a packet (isochronous: a millisecond's) */
+} Variant;
 
-static int descriptors(int ep0)
+static const Variant VARIANTS[] = {
+    {"control: bulk, one each way (the clock link's kind)", 1, 1, 0, 512},
+    {"isochronous out only, 196 bytes (48 kHz stereo 16-bit)", 1, 0, 1, 196},
+    {"isochronous in only, 196 bytes", 0, 1, 1, 196},
+    {"isochronous out only, 294 bytes (48 kHz stereo 24-bit)", 1, 0, 1, 294},
+    {"isochronous both ways, 196 bytes each", 1, 1, 1, 196},
+    {"isochronous out only, 64 bytes (a small one)", 1, 0, 1, 64},
+};
+
+/* one interface with the variant's endpoints; full speed (1 ms) and high speed (bInterval 4: 1 ms) */
+static int descriptors(int ep0, const Variant *v)
 {
-    struct {
-        struct usb_functionfs_descs_head_v2 head;
-        __le32 fs_count, hs_count;
-        Descs fs, hs;
-    } __attribute__((packed)) d;
-    memset(&d, 0, sizeof d);
-    d.head.magic = htole32(FUNCTIONFS_DESCRIPTORS_MAGIC_V2);
-    d.head.flags = htole32(FUNCTIONFS_HAS_FS_DESC | FUNCTIONFS_HAS_HS_DESC);
-    d.head.length = htole32(sizeof d);
-    d.fs_count = d.hs_count = htole32(3);
-    Descs *s[2] = {&d.fs, &d.hs};
-    for (int k = 0; k < 2; k++) {
-        s[k]->intf.bLength = USB_DT_INTERFACE_SIZE;
-        s[k]->intf.bDescriptorType = USB_DT_INTERFACE;
-        s[k]->intf.bNumEndpoints = 2;
-        s[k]->intf.bInterfaceClass = USB_CLASS_VENDOR_SPEC;
-        s[k]->intf.iInterface = 1;
-        s[k]->out.bLength = s[k]->in.bLength = USB_DT_ENDPOINT_SIZE;
-        s[k]->out.bDescriptorType = s[k]->in.bDescriptorType = USB_DT_ENDPOINT;
-        s[k]->out.bEndpointAddress = 1 | USB_DIR_OUT;
-        s[k]->in.bEndpointAddress = 2 | USB_DIR_IN;
-        s[k]->out.bmAttributes = s[k]->in.bmAttributes = USB_ENDPOINT_XFER_ISOC | USB_ENDPOINT_SYNC_ASYNC;
-        s[k]->out.wMaxPacketSize = s[k]->in.wMaxPacketSize = htole16(294);
-        s[k]->out.bInterval = s[k]->in.bInterval = k ? 4 : 1;
+    uint8_t buf[256];
+    int n = 0, neps = v->out + v->in;
+    struct usb_functionfs_descs_head_v2 head;
+    n = sizeof head + 8; /* the head, then fs_count and hs_count */
+    for (int k = 0; k < 2; k++) { /* full speed, high speed */
+        struct usb_interface_descriptor intf;
+        memset(&intf, 0, sizeof intf);
+        intf.bLength = USB_DT_INTERFACE_SIZE;
+        intf.bDescriptorType = USB_DT_INTERFACE;
+        intf.bNumEndpoints = (uint8_t)neps;
+        intf.bInterfaceClass = USB_CLASS_VENDOR_SPEC;
+        intf.iInterface = 1;
+        memcpy(buf + n, &intf, USB_DT_INTERFACE_SIZE), n += USB_DT_INTERFACE_SIZE;
+        for (int dir = 0; dir < 2; dir++) {
+            if (dir == 0 ? !v->out : !v->in) continue;
+            struct usb_endpoint_descriptor_no_audio ep;
+            memset(&ep, 0, sizeof ep);
+            ep.bLength = USB_DT_ENDPOINT_SIZE;
+            ep.bDescriptorType = USB_DT_ENDPOINT;
+            ep.bEndpointAddress = (uint8_t)(dir == 0 ? 1 | USB_DIR_OUT : 2 | USB_DIR_IN);
+            ep.bmAttributes = v->iso ? USB_ENDPOINT_XFER_ISOC | USB_ENDPOINT_SYNC_ASYNC : USB_ENDPOINT_XFER_BULK;
+            ep.wMaxPacketSize = htole16((uint16_t)(v->iso ? v->size : k ? 512 : 64));
+            ep.bInterval = (uint8_t)(v->iso ? (k ? 4 : 1) : 0);
+            memcpy(buf + n, &ep, USB_DT_ENDPOINT_SIZE), n += USB_DT_ENDPOINT_SIZE;
+        }
     }
-    if (write(ep0, &d, sizeof d) != (ssize_t)sizeof d) return -errno;
+    memset(&head, 0, sizeof head);
+    head.magic = htole32(FUNCTIONFS_DESCRIPTORS_MAGIC_V2);
+    head.flags = htole32(FUNCTIONFS_HAS_FS_DESC | FUNCTIONFS_HAS_HS_DESC);
+    head.length = htole32((uint32_t)n);
+    memcpy(buf, &head, sizeof head);
+    __le32 count = htole32((uint32_t)(1 + neps));
+    memcpy(buf + sizeof head, &count, 4), memcpy(buf + sizeof head + 4, &count, 4);
+    if (write(ep0, buf, (size_t)n) != (ssize_t)n) return -errno;
     struct {
         struct usb_functionfs_strings_head head;
         struct {
@@ -98,6 +117,41 @@ static int descriptors(int ep0)
     memcpy(str.lang.str, "brickio iso test", 17);
     if (write(ep0, &str, sizeof str) != (ssize_t)sizeof str) return -errno;
     return 0;
+}
+
+/* one variant: set up, bind for a moment, take down (in the clock link's order). 1 bound, 0 not, -1 a
+ * setup problem */
+static int try_variant(const char *udc, const Variant *v)
+{
+    printf("iso: %s\n", v->what);
+    teardown();
+    int ok = mkdir(G, 0755) == 0 && put(G "/idVendor", "0x1d6b") && put(G "/idProduct", "0x0105") && mkdir(G "/strings/0x409", 0755) == 0 &&
+             put(G "/strings/0x409/product", "brickio iso test") && mkdir(G "/configs/c.1", 0755) == 0 &&
+             mkdir(G "/functions/ffs.brickioiso", 0755) == 0 && mkdir(FFS_DIR, 0755) == 0 &&
+             mount("brickioiso", FFS_DIR, "functionfs", 0, NULL) == 0;
+    if (!ok) { printf("     couldn't set up the test gadget (%s)\n", strerror(errno)); teardown(); return -1; }
+    int ep0 = open(FFS_DIR "/ep0", O_RDWR);
+    int r = ep0 < 0 ? -errno : descriptors(ep0, v);
+    if (r < 0) {
+        printf("     FunctionFS refused it (%s)\n", strerror(-r));
+        if (ep0 >= 0) close(ep0);
+        teardown();
+        return 0;
+    }
+    int bound = 0;
+    if (symlink(G "/functions/ffs.brickioiso", G "/configs/c.1/ffs.brickioiso") != 0)
+        printf("     couldn't link the function (%s)\n", strerror(errno));
+    else {
+        char line[310];
+        snprintf(line, sizeof line, "%s\n", udc);
+        bound = put(G "/UDC", line);
+        if (bound) printf("     BOUND\n"), usleep(200000);
+        else printf("     not bound (%s)\n", strerror(errno));
+    }
+    put(G "/UDC", "\n");
+    close(ep0);
+    teardown();
+    return bound;
 }
 
 int main(void)
@@ -119,37 +173,15 @@ int main(void)
             if (fd >= 0) { ssize_t r = read(fd, v, sizeof v - 1); close(fd); if (r > 1) { printf("iso: the port is in use (gadget %s): run with no app open\n", e->d_name); closedir(g); return 0; } }
         }
     if (g) closedir(g);
-    teardown();
-    int ok = mkdir(G, 0755) == 0 && put(G "/idVendor", "0x1d6b") && put(G "/idProduct", "0x0105") && mkdir(G "/strings/0x409", 0755) == 0 &&
-             put(G "/strings/0x409/product", "brickio iso test") && mkdir(G "/configs/c.1", 0755) == 0 &&
-             mkdir(G "/functions/ffs.brickioiso", 0755) == 0 && mkdir(FFS_DIR, 0755) == 0 &&
-             mount("brickioiso", FFS_DIR, "functionfs", 0, NULL) == 0;
-    if (!ok) { printf("iso: couldn't set up the test gadget (%s)\n", strerror(errno)); teardown(); return 0; }
-    printf("iso: test gadget set up, FunctionFS mounted\n");
-    fflush(stdout);
-    int ep0 = open(FFS_DIR "/ep0", O_RDWR);
-    int r = ep0 < 0 ? -errno : descriptors(ep0);
-    if (r < 0) {
-        printf("iso: FunctionFS refused isochronous endpoints (%s): the receiving Brick can't be a standard USB audio device\n", strerror(-r));
-        if (ep0 >= 0) close(ep0);
-        teardown();
-        return 0;
+    int control = 0, any = 0;
+    for (unsigned i = 0; i < sizeof VARIANTS / sizeof VARIANTS[0]; i++) {
+        int r = try_variant(udc, &VARIANTS[i]);
+        if (i == 0) control = r == 1;
+        else if (r == 1) any = 1;
     }
-    printf("iso: FunctionFS took the isochronous endpoints\n");
-    if (symlink(G "/functions/ffs.brickioiso", G "/configs/c.1/ffs.brickioiso") != 0) printf("iso: couldn't link the function (%s)\n", strerror(errno));
-    char line[310];
-    snprintf(line, sizeof line, "%s\n", udc);
-    if (put(G "/UDC", line)) {
-        printf("iso: AVAILABLE: the USB controller (%s) bound them: a receiving Brick can be a standard USB audio device\n", udc);
-        usleep(300000);
-    } else
-        printf("iso: the USB controller (%s) couldn't bind them (%s): no standard USB audio device here, brickio's own channel instead\n", udc,
-               strerror(errno));
-    printf("iso: taking it down...\n");
-    fflush(stdout);
-    put(G "/UDC", "\n");
-    close(ep0);
-    teardown();
-    printf("iso: test gadget removed\n");
+    if (!control) printf("iso: the control didn't bind either: the test itself can't bind here, so this says nothing about isochronous\n");
+    else if (any) printf("iso: AVAILABLE in some form (see BOUND above): a receiving Brick can be a standard USB audio device that way\n");
+    else printf("iso: NOT AVAILABLE: bulk binds, isochronous doesn't: brickio's own channel (bulk, as the clock link)\n");
+    printf("iso: test gadgets removed\n");
     return 0;
 }
