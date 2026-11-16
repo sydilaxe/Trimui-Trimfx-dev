@@ -42,8 +42,11 @@ if [ ! -d "$CFG" ]; then
     exit 0
 fi
 mkdir "$G" 2>/dev/null || { echo "can't make a test gadget (not root?)"; exit 0; }
-# each step says what it is about to do first, so a step that hangs shows in probe.txt
-for f in uac2 uac1 midi ffs; do
+# each step says what it is about to do first, so a step that hangs shows in probe.txt.
+# Not ffs: the apps' clock link already uses it, and a bare FunctionFS instance made and removed
+# without being mounted hung a Brick's kernel (4.9) on its removal. probe-iso tests it the way the
+# clock link sets it up and takes it down (mounted, then unmounted, then removed).
+for f in uac2 uac1 midi; do
     if mkdir "$G/functions/$f.probe" 2>/dev/null; then
         echo "$f: AVAILABLE"
         echo "  removing the $f test..."

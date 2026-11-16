@@ -32,14 +32,16 @@ static int put(const char *path, const char *text)
     return ok;
 }
 
+/* in the clock link's order (link.c's teardown, proven on the Bricks): let go of the port, unmount,
+ * then unlink and remove (ep0 is closed before this) */
 static void teardown(void)
 {
     put(G "/UDC", "\n");
+    umount(FFS_DIR);
+    rmdir(FFS_DIR);
     unlink(G "/configs/c.1/ffs.brickioiso");
     rmdir(G "/configs/c.1/strings/0x409");
     rmdir(G "/configs/c.1");
-    umount(FFS_DIR);
-    rmdir(FFS_DIR);
     rmdir(G "/functions/ffs.brickioiso");
     rmdir(G "/strings/0x409");
     rmdir(G);
@@ -100,6 +102,7 @@ static int descriptors(int ep0)
 
 int main(void)
 {
+    setvbuf(stdout, NULL, _IONBF, 0); /* each line out at once: a step that hangs still shows */
     char udc[300] = "";
     DIR *d = opendir("/sys/class/udc");
     struct dirent *e;
@@ -122,6 +125,8 @@ int main(void)
              mkdir(G "/functions/ffs.brickioiso", 0755) == 0 && mkdir(FFS_DIR, 0755) == 0 &&
              mount("brickioiso", FFS_DIR, "functionfs", 0, NULL) == 0;
     if (!ok) { printf("iso: couldn't set up the test gadget (%s)\n", strerror(errno)); teardown(); return 0; }
+    printf("iso: test gadget set up, FunctionFS mounted\n");
+    fflush(stdout);
     int ep0 = open(FFS_DIR "/ep0", O_RDWR);
     int r = ep0 < 0 ? -errno : descriptors(ep0);
     if (r < 0) {
@@ -140,6 +145,8 @@ int main(void)
     } else
         printf("iso: the USB controller (%s) couldn't bind them (%s): no standard USB audio device here, brickio's own channel instead\n", udc,
                strerror(errno));
+    printf("iso: taking it down...\n");
+    fflush(stdout);
     put(G "/UDC", "\n");
     close(ep0);
     teardown();
