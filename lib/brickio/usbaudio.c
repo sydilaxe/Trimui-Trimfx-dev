@@ -51,7 +51,8 @@ static char direct_failed[128];
 /* DUPLEX: one USB interface both ways, run by duplex.c (no SDL streams, no cushion) */
 static int duplex_on, duplex_off, duplex_periods = 2;
 /* DUPLEX keeping a period more out, by itself: <app>_PERIODS unset, and the interface missing periods
- * with 2 queued (6 in 10 s): a full-speed one (the bluebox) at 128 frames. For that card, this session */
+ * with 2 queued (6 in 10 s): a full-speed one (the bluebox) at 128 frames. For that card, at that buffer
+ * and below; kept in audio.txt (periods3@<card>=<frames>), so the next start needs no 10 s to find it */
 static int periods_env, dx_periods_now = 2;
 static char dx_more[48];
 static int dx_more_frames; /* ... at this buffer and below */
@@ -640,6 +641,7 @@ static void save(void)
     fprintf(f, "in=%s\nout=%s\nin_pair=%d\nout_pair=%d\nbuffer=%d\n", in_want, out_want, in_pair_want, out_pair_want, buf_global);
     for (int i = 0; i < NDEVBUF; i++)
         if (devbuf[i].id[0]) fprintf(f, "buffer@%s=%d\n", devbuf[i].id, devbuf[i].frames);
+    if (*dx_more && dx_more_frames > 0) fprintf(f, "periods3@%s=%d\n", dx_more, dx_more_frames);
     fclose(f);
     rename(tmp, cfg.settings);
 }
@@ -660,6 +662,8 @@ static void load(void)
         else if (!strcmp(line, "in_pair")) in_pair_want = atoi(v) & 3;
         else if (!strcmp(line, "out_pair")) out_pair_want = atoi(v) & 3;
         else if (!strcmp(line, "buffer")) buf_user = atoi(v);
+        else if (!strncmp(line, "periods3@", 9) && valid_buffer(atoi(v)))
+            snprintf(dx_more, sizeof dx_more, "%s", line + 9), dx_more_frames = atoi(v);
         else if (!strncmp(line, "buffer@", 7))
             for (int i = 0; i < NDEVBUF; i++)
                 if (!devbuf[i].id[0]) { snprintf(devbuf[i].id, sizeof devbuf[i].id, "%s", line + 7), devbuf[i].frames = atoi(v); break; }
@@ -759,8 +763,11 @@ int ua_tick(void)
         if (dx_periods_now < 3 && !periods_env && (Sint32)(now - dx_win_at) >= 0) {
             unsigned xr = dx_xruns();
             if (xr - dx_win_x >= 6) {
+                char was[48];
+                snprintf(was, sizeof was, "%s", dx_more);
                 card_id(out_name, dx_more, sizeof dx_more);
-                dx_more_frames = dx_frames();
+                if (strcmp(was, dx_more) || dx_frames() > dx_more_frames) dx_more_frames = dx_frames();
+                save();
                 lg("AUDIO", "DUPLEX missed %u periods in 10 s with 2 queued: 3 queued from now on for %s at %d frames and below (a period more latency; "
                    "%s_PERIODS=2 keeps 2)", xr - dx_win_x, *dx_more ? dx_more : "the interface", dx_frames(), cfg.app);
                 notes |= UA_NOTE_REOPEN;
