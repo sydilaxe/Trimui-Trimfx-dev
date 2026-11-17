@@ -23,7 +23,7 @@ enum { M_TONE, M_MOD, M_DELAY, M_VERB, NMOD };
 typedef struct {
     int algo;
     int bypass;
-    float mix;                    /* 0 dry .. 1 all wet */
+    float mix;                    /* the module's level: 0 silent .. 1 unity. No dry: only its wet goes on */
     float p[MAXALGO][NPARAM];     /* each algorithm's own settings, 0..1 */
 } ModState;
 
@@ -33,8 +33,17 @@ typedef struct {
     float dry;                    /* the dry input added at the very end, 0..1 (0 for an FX send) */
     float bpm;                    /* tempo for the rhythmic delay, 40..240 */
     int order;                    /* 0..NORDER-1: the order of MOD, DELAY, REVERB */
+    int route;                    /* ROUTE_SERIES or ROUTE_SEND: what MOD, DELAY and REVERB hear */
     int freeze_dly, freeze_verb;  /* hold the delay's / reverb's contents, input closed */
 } Patch;
+
+/* ROUTE_SERIES: each module hears only the wet of the one before it (TONE's, for the first).
+ * ROUTE_SEND: each hears the signal from TONE plus every wet before it, and adds its own; at the
+ * end the signal from TONE is taken away again, so only the effects come out. Either way a module
+ * has no dry of its own: the dry is MASTER > DRY only. With MOD, DELAY and REVERB all bypassed,
+ * TONE's own sound comes out (or, TONE bypassed too, the input) */
+enum { ROUTE_SERIES, ROUTE_SEND, NROUTE };
+const char *eng_route_name(int route);       /* "SERIES" */
 
 /* what the UI shows about each module and algorithm */
 typedef struct {
