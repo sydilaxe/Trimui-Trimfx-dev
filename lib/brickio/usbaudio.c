@@ -58,6 +58,7 @@ static char dx_more[48];
 static int dx_more_frames; /* ... at this buffer and below */
 static Uint32 dx_win_at;
 static unsigned dx_win_x;
+static int dx_win_armed; /* 0 for the first 3 s after opening: a reopen's own misses don't count */
 static char duplex_failed[48];                /* a card it failed on: the SDL path for it */
 static unsigned dx_seen_xruns;
 static Uint32 dx_held_at; /* when to log what DUPLEX really holds (0: done) */
@@ -583,7 +584,7 @@ static int start_duplex(const char *o, const char *i)
     atomic_store(&in_block, fr);
     atomic_store_explicit(&have_in, chi > 0, memory_order_release);
     dx_seen_xruns = 0;
-    dx_periods_now = per, dx_win_x = 0, dx_win_at = SDL_GetTicks() + 10000;
+    dx_periods_now = per, dx_win_x = 0, dx_win_armed = 0, dx_win_at = SDL_GetTicks() + 3000;
     dx_held_at = SDL_GetTicks() + 3000;
     if (!dx_held_at) dx_held_at = 1;
     if (chi > 0)
@@ -762,7 +763,9 @@ int ua_tick(void)
         /* missing periods with 2 queued: a period more, for this card (each is a dropout counted above) */
         if (dx_periods_now < 3 && !periods_env && (Sint32)(now - dx_win_at) >= 0) {
             unsigned xr = dx_xruns();
-            if (xr - dx_win_x >= 6) {
+            if (!dx_win_armed) { /* the 10 s count starts once the reopen has settled */
+                dx_win_armed = 1, dx_win_x = xr, dx_win_at = now + 10000;
+            } else if (xr - dx_win_x >= 6) {
                 char was[48];
                 snprintf(was, sizeof was, "%s", dx_more);
                 card_id(out_name, dx_more, sizeof dx_more);
