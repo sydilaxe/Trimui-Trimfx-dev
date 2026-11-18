@@ -21,7 +21,7 @@ app builds for MustardOS. It has **not yet run on Brick hardware.**
 
 - Every module has several **algorithms** (L2 / R2). Each algorithm has its own controls, and each
   remembers its settings.
-- **No module has a dry.** Each module's **MIX** is its level (100 % = unity), and only its wet
+- **No module has a dry.** Each module's **LEVEL** (it was MIX) sets its wet (100 % = unity), and only its wet
   goes on. The dry is **MASTER > DRY** alone, off by default, so the return carries only the
   effect. It's timed to line up with the effects, so turning it up doesn't comb-filter.
 - **MASTER > ROUTE** sets what MOD, DELAY and REVERB hear:
@@ -73,7 +73,7 @@ Each pedal has:
 - **four big knobs**: the PERFORM set, on the sticks
 - **four small knobs**: the DEEP set
 - a big **ALGORITHM** selector knob, with a punched dot for each position
-- a **MIX** knob
+- a **LEVEL** knob
 - a **Dymo-tape readout** of what you are turning
 - an amber **LED** with a ribbed lens: lit when on, dark when bypassed, blue when frozen
 - on DELAY and REVERB, a mini **F toggle** that shows FREEZE (L3 / R3)
@@ -90,7 +90,7 @@ from MASTER > SETUP or STICKS, or with HOME on the Brick Pro.
 |---|---|
 | F1 / F2 | Previous / next pedal (then MASTER), so the shoulder buttons are never needed. In an overlay: switch between SETUP and STICKS |
 | L1 / R1 | The same as F1 / F2 |
-| D-pad ↑↓ | Choose a control on the pedal: ALGORITHM, the 4 knobs, the 4 sliders, MIX |
+| D-pad ↑↓ | Choose a control on the pedal: ALGORITHM, the 4 knobs, the 4 sliders, LEVEL |
 | D-pad ←→ | Turn it (hold to speed up). On ALGORITHM: change the algorithm |
 | A | The pedal's footswitch (bypass). On ALGORITHM: open its DEEP page. On MASTER rows: open SETUP / STICKS, save to the slot |
 | B | Sticks: FOCUS ↔ MATRIX (in an overlay: close it) |
@@ -125,7 +125,7 @@ same lights.
 
 Plug a USB MIDI controller in (through a hub, with the audio interface) and it is picked up within two
 seconds. The **TRIMFX template** for the Korg nanoKONTROL Studio puts 36 controls on hardware: the
-8 knobs are the eight parameters of a box, the 8 faders are the four MIXes, IN, DRY, OUT and TEMPO,
+8 knobs are the eight parameters of a box, the 8 faders are the four LEVELs, IN, DRY, OUT and TEMPO,
 and the buttons are the footswitches, freezes, algorithm steps, pages, presets, tap and save.
 Scene 1 follows the page on screen; scenes 2-5 are TONE, MOD, DELAY and REVERB, so all 32 parameters
 are a scene change away. Any controller can be mapped with **MIDI LEARN**: hold SELECT, choose a

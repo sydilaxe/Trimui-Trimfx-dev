@@ -29,7 +29,7 @@ the controller once with KONTROL Editor:
 | Control | CC | Does |
 |---|---|---|
 | Knobs 1-8 | 21-28 | P1-P8 of the box (scene 1: the one on screen, or its DEEP page while that is open; scenes 2-5: TONE / MOD / DELAY / REVERB). P1-P4 are the stick parameters, P5-P8 the small knobs. On channels 6-9 (a scene set to them) the same knobs move the DEEP settings of TONE / MOD / DELAY / REVERB |
-| Faders 1-4 | 31-34 | MIX of TONE, MOD, DELAY, REVERB |
+| Faders 1-4 | 31-34 | LEVEL of TONE, MOD, DELAY, REVERB |
 | Faders 5-8 | 35-38 | IN level (-24..+24 dB), DRY, OUT level, TEMPO (40-240 BPM) |
 | SOLO 1-4 | 41-44 | Footswitch (on / bypass) of TONE, MOD, DELAY, REVERB |
 | SOLO 5-6 | 45-46 | Freeze the delay / the reverb |
@@ -59,7 +59,7 @@ what will be learned and what it is mapped from now. Learning stays on, so a who
 mapped in one go:
 
 1. Choose what to map:
-   - a control on the board, with F1 / F2 and the D-pad: a knob, a slider, MIX, ALGORITHM, or on
+   - a control on the board, with F1 / F2 and the D-pad: a knob, a slider, LEVEL, ALGORITHM, or on
      MASTER IN / OUT / DRY / TEMPO / ORDER / SLOT; or a setting on a DEEP page (open the page
      first, then hold SELECT);
    - or press the button whose job it should do: **A** the box's footswitch, **L3 / R3** freeze
@@ -80,11 +80,11 @@ The map is then kept in `midimap.txt` beside the app, one line per mapping, and 
 ```
 # channel (1-16 or *), cc<n> or note<n>, action, module, value
 * cc21 PARAM CHAN 0
-2 cc7 MIX VERB 0
+2 cc7 LEVEL VERB 0
 * note36 BYPASS DELAY 0
 ```
 
-Actions: `PARAM` (value: parameter 0-7), `MIX`, `ALGO`, `ALGOSTEP` (value: -1 / 1), `BYPASS`,
+Actions: `PARAM` (value: parameter 0-7), `LEVEL` (`MIX` in an older map is read as LEVEL), `ALGO`, `ALGOSTEP` (value: -1 / 1), `BYPASS`,
 `FREEZE` (0 delay, 1 reverb, 2 both), `MASTER` (0 IN, 1 OUT, 2 DRY, 3 TEMPO), `ORDER` (-1 / 1),
 `PAGE` (-1 / 1), `PAGETO` (0-4), `PRESET` (-1 / 1), `SAVE`, `TAP`, `STICK` (0 matrix, 1 latch,
 2 hold), `JOG`. Modules: `TONE`, `MOD`, `DELAY`, `VERB`, `PAGE` (the one on screen), `CHAN`

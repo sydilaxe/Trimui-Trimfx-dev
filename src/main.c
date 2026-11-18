@@ -210,7 +210,7 @@ static SDL_Surface *surf;
 /* ================================================================ the UI: one pane, a pedalboard */
 /* Four pedals side by side (TONE, MOD, DELAY, REVERB) and a MASTER strip. Each pedal: an LCD
  * (the algorithm and the control being set), four PERFORM knobs (on the sticks), four DEEP
- * sliders, a MIX fader and a footswitch. Below: the selected pedal's two X/Y pads. Rarely used
+ * sliders, a LEVEL knob and a footswitch. Below: the selected pedal's two X/Y pads. Rarely used
  * things (devices, save / load, the stick matrix) are in overlays opened from MASTER. */
 enum { COL_TONE, COL_MOD, COL_DELAY, COL_VERB, COL_MASTER, NCOL };
 enum { R_ALGO, R_K1, R_K2, R_K3, R_K4, R_D1, R_D2, R_D3, R_D4, R_MIX, NPROW };
@@ -319,7 +319,7 @@ static int deep_rows(int m, int idx[NPARAM - NBOARD])
     return n;
 }
 
-/* the targets a matrix slot can take: NONE, then per module MIX, P1..P8 */
+/* the targets a matrix slot can take: NONE, then per module LEVEL, P1..P8 */
 #define NTARGET (1 + NMOD * (1 + NPARAM))
 static Target target_of(int i)
 {
@@ -336,7 +336,7 @@ static void target_name(Target t, char *o, int n)
 {
     if (t.mod < 0) { snprintf(o, n, "NONE"); return; }
     const ModInfo *mi = eng_info(t.mod);
-    if (t.param < 0) snprintf(o, n, "%s MIX", mi->name);
+    if (t.param < 0) snprintf(o, n, "%s LEVEL", mi->name);
     else {
         const char *pn = mi->pname[base.m[t.mod].algo][t.param];
         snprintf(o, n, "%s %s", mi->name, pn && *pn ? pn : "-");
@@ -674,7 +674,7 @@ static void log_input(void)
              lv.lim_hits ? "" : ", untouched");
     if (lv.lim_hits)
         perf_log("LIMIT", "the safety limiter cut in %u time%s, by up to %.1f dB: each can click. Turn MASTER > OUT%s down",
-                 lv.lim_hits, lv.lim_hits == 1 ? "" : "s", -20.f * log10f(lv.lim_min), hot ? " or the hot module's MIX / level" : "");
+                 lv.lim_hits, lv.lim_hits == 1 ? "" : "s", -20.f * log10f(lv.lim_min), hot ? " or the hot module's LEVEL" : "");
 }
 
 /* ---------------------------------------------------------------- self-update (update.h) */
@@ -815,7 +815,7 @@ static void button(BiButton b, int down)
  * docs/midi.md, or anything else through MIDI LEARN). The map: which CC or
  * note on which channel does what. midimap.txt in the app folder, if there,
  * replaces the built-in template. */
-static const char *const MA_NAME[MA_N] = {"PARAM", "MIX", "ALGO", "ALGOSTEP", "BYPASS", "FREEZE", "MASTER", "ORDER",
+static const char *const MA_NAME[MA_N] = {"PARAM", "LEVEL", "ALGO", "ALGOSTEP", "BYPASS", "FREEZE", "MASTER", "ORDER",
                                           "PAGE", "PAGETO", "PRESET", "SAVE", "TAP", "STICK", "JOG"};
 #define MM_PAGE (-1)  /* the module on screen */
 #define MM_CHAN (-2)  /* by channel: 1 = the module on screen, 2..5 = TONE, MOD, DELAY, REVERB */
@@ -892,6 +892,7 @@ static void midimap_load(void)
         else if (!strncmp(src, "cc", 2)) m.num = (unsigned char)atoi(src + 2);
         else continue;
         for (int a = 0; a < MA_N; a++) if (!strcmp(act, MA_NAME[a])) m.act = (signed char)a;
+        if (!strcmp(act, "MIX")) m.act = MA_MIX; /* LEVEL's old name, in an older midimap.txt */
         for (int k = 0; k < NMOD + 2; k++) if (!strcmp(mod, MM_NAME[k])) m.mod = (signed char)(k - 2);
         if (m.act >= 0 && !uses_mod(m.act)) m.mod = 0;
         if (m.act < 0 || m.mod < -2 || m.ch > 15) continue;
@@ -928,7 +929,7 @@ static void midi_apply(const MidiMap *m, int ch, int val, int rise)
     case MA_MIX:
         if (mod < 0) return;
         base.m[mod].mix = v;
-        toast("%s MIX  %.0f%%", eng_info(mod)->name, v * 100.f);
+        toast("%s LEVEL  %.0f%%", eng_info(mod)->name, v * 100.f);
         break;
     case MA_ALGO: {
         if (mod < 0) return;
@@ -1034,7 +1035,7 @@ static void learn_name(const MidiMap *m, char *o, int n)
     if (m->act == MA_BYPASS) { snprintf(o, n, "%s FOOTSWITCH", mi->name); return; }
     if (m->act == MA_ALGOSTEP) { snprintf(o, n, "%s ALGO %s", mi->name, m->arg > 0 ? "+" : "-"); return; }
     if (m->act == MA_PARAM) snprintf(o, n, "%s P%d %s", mi->name, m->arg + 1, mi->pname[base.m[m->mod].algo][m->arg]);
-    else snprintf(o, n, "%s %s", mi->name, m->act == MA_MIX ? "MIX" : "ALGO");
+    else snprintf(o, n, "%s %s", mi->name, m->act == MA_MIX ? "LEVEL" : "ALGO");
 }
 
 static void learn_on(int on)
@@ -1427,7 +1428,7 @@ static void hslider(int x, int y, int w, float stored, float lv, uint32_t col_, 
     if (fabsf(lv - stored) > 0.004f) gfx_fill(x + (int)(w * lv) - 2, y - 5, 4, thick + 10, axc);
 }
 
-/* which stick axis moves parameter k of module m now (NULL: none; k -1: MIX) */
+/* which stick axis moves parameter k of module m now (NULL: none; k -1: LEVEL) */
 static const char *axis_of(int m, int k, uint32_t *c)
 {
     if (!stick_matrix) {
@@ -1511,11 +1512,11 @@ static void pedal(int x, int m, int pass)
     snprintf(v, sizeof v, "%d", a + 1);
     stamp_c(acx, acy + 50, v, 0, 0);
 
-    /* MIX */
+    /* LEVEL */
     uint32_t axc = ACCENT;
     axis_of(m, -1, &axc);
     knob(x + 150, acy - 8, 24, ms->mix, live.m[m].mix, axc, 1, focused && s == R_MIX);
-    stamp_c(x + 150, acy + 26, "MIX", 0, 2);
+    stamp_c(x + 150, acy + 26, "LEVEL", 0, 2);
 
     /* the name of the algorithm, then the Dymo readout */
     snprintf(b, sizeof b, "%s", mi->algo[a]);
@@ -1525,7 +1526,7 @@ static void pedal(int x, int m, int pass)
         mi->fmt(a, k, live.m[m].p[a][k], &live, v, sizeof v);
         snprintf(b, sizeof b, "%s %s", mi->pname[a][k], v);
     } else if (focused && s == R_MIX)
-        snprintf(b, sizeof b, "MIX %.0f%%  LEVEL", live.m[m].mix * 100.f);
+        snprintf(b, sizeof b, "LEVEL %.0f%%", live.m[m].mix * 100.f);
     else if (focused && s == R_ALGO)
         snprintf(b, sizeof b, "%d/%d %s  A:DEEP", a + 1, mi->nalgo, mi->algo[a]);
     else

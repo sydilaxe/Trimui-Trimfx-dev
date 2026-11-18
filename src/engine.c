@@ -110,7 +110,7 @@ void patch_default(Patch *p)
     p->route = ROUTE_SERIES;
 }
 
-/* (the presets run every module at unity: a module's MIX is its level, with no dry) */
+/* (the presets run every module at unity: a module's LEVEL, with no dry) */
 static void setp(Patch *p, int m, int algo, float mix, const float *v)
 {
     p->m[m].algo = algo;

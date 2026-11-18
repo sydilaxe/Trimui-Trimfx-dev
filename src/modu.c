@@ -663,6 +663,6 @@ const ModInfo modu_info = {
         {0.4f, 0.6f, 0.75f, 1.f, 0.4f, 0.2f, 0.6f, 0.5f, 0.f, 0.5f, 0.75f},
         {0.55f, 0.35f, 0.5f, 0.3f, 0.25f, 0.85f, 0.5f, 0.5f, 0.f, 0.f, 0.5113916f, 0.5f},
     },
-    1.f, /* MIX: the level, unity */
+    1.f, /* LEVEL: unity */
     fmt,
 };
