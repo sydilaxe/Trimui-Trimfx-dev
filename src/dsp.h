@@ -179,12 +179,12 @@ static inline float svf_g_fast(float hz)
 /* ---- a parameter glide: one-pole toward a target, per block */
 static inline float glide(float cur, float target, float k) { return cur + (target - cur) * k; }
 
-/* equal-power dry/wet: mix 0 = dry, 1 = all wet (no dry at all) */
-static inline void mix_gains(float mix, float *dry, float *wet)
+/* a module's MIX as its wet's gain (no dry): the old equal-power wet curve, so a saved patch's
+ * effect stays as loud as it was; 1 is unity */
+static inline float mix_level(float mix)
 {
     mix = clampf(mix, 0.f, 1.f);
-    *dry = cosf(mix * TFX_PI * 0.5f);
-    *wet = sinf(mix * TFX_PI * 0.5f);
-    if (mix >= 0.999f) *dry = 0.f, *wet = 1.f;
-    if (mix <= 0.001f) *dry = 1.f, *wet = 0.f;
+    if (mix >= 0.999f) return 1.f;
+    if (mix <= 0.001f) return 0.f;
+    return sinf(mix * TFX_PI * 0.5f);
 }

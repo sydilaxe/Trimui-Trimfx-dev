@@ -21,8 +21,18 @@ app builds for MustardOS. It has **not yet run on Brick hardware.**
 
 - Every module has several **algorithms** (L2 / R2). Each algorithm has its own controls, and each
   remembers its settings.
-- Every module's **MIX** goes to **100 % wet**, with no dry at all, and **MASTER > DRY**
-  defaults to off. The return carries only the effect.
+- **No module has a dry.** Each module's **MIX** is its level (100 % = unity), and only its wet
+  goes on. The dry is **MASTER > DRY** alone, off by default, so the return carries only the
+  effect. It's timed to line up with the effects, so turning it up doesn't comb-filter.
+- **MASTER > ROUTE** sets what MOD, DELAY and REVERB hear:
+  - **SERIES**: each one hears only the wet of the one before it, so a reverb after the delay
+    hears just the echoes.
+  - **SEND**: each one hears the signal from TONE plus every wet before it, and adds its own. The
+    signal from TONE is taken away again at the end, exactly, so only the effects come out. A
+    reverb after the delay hears the first hit and the echoes.
+
+  A single effect sounds the same either way. Switching dips the effects for 10 ms, so it doesn't
+  click. With MOD, DELAY and REVERB all bypassed, TONE's own sound comes out.
 - **DELAY and REVERB bypass with trails**: the input closes and the tail rings out.
 - **FREEZE**: L3 holds the delay, R3 holds the reverb, forever, with the input closed.
 - The chain order of MOD, DELAY and REVERB can be changed (MASTER > ORDER). TONE always comes
@@ -56,7 +66,7 @@ at once. On the Brick Pro, the stick rings light up as you push.
 
 Everything is on one screen: a board of raw-aluminium boxes with hand-stamped lettering, in signal order:
 - **Four pedals**: TONE, MOD, DELAY and REVERB.
-- **A master box**: IN and OUT gain, DRY, TEMPO, ORDER and PRESET, the IN / OUT lights, three mini toggles
+- **A master box**: IN and OUT gain, DRY, TEMPO, ORDER, ROUTE and PRESET, the IN / OUT lights, three mini toggles
   for the sticks (M matrix, L latch, H hold) and the two joysticks.
 
 Each pedal has:

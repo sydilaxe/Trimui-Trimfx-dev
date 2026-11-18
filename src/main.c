@@ -146,7 +146,7 @@ static void save_patch(const char *path, const Patch *p)
     FILE *f = fopen(tmp, "w");
     if (!f) return;
     fprintf(f, "# TrimFX %s\nname=%s\n", TFX_VERSION, patch_name);
-    fprintf(f, "in_db=%g\nout_db=%g\ndry=%g\nbpm=%g\norder=%d\n", p->in_db, p->out_db, p->dry, p->bpm, p->order);
+    fprintf(f, "in_db=%g\nout_db=%g\ndry=%g\nbpm=%g\norder=%d\nroute=%d\n", p->in_db, p->out_db, p->dry, p->bpm, p->order, p->route);
     for (int m = 0; m < NMOD; m++) {
         fprintf(f, "m%d.algo=%d\nm%d.bypass=%d\nm%d.mix=%g\n", m, p->m[m].algo, m, p->m[m].bypass, m, p->m[m].mix);
         for (int a = 0; a < eng_info(m)->nalgo; a++)
@@ -182,6 +182,7 @@ static int load_patch(const char *path, Patch *p)
         else if (!strcmp(k, "dry")) p->dry = strtof(v, NULL);
         else if (!strcmp(k, "bpm")) p->bpm = strtof(v, NULL);
         else if (!strcmp(k, "order")) p->order = atoi(v) % NORDER;
+        else if (!strcmp(k, "route")) p->route = atoi(v) == ROUTE_SEND ? ROUTE_SEND : ROUTE_SERIES;
         else if (!strcmp(k, "sticks.matrix")) stick_matrix = atoi(v) != 0;
         else if (!strcmp(k, "sticks.latch")) stick_latch = atoi(v) != 0;
         else if (sscanf(k, "m%d.p%d.%d", &m, &a, &i) == 3) {
@@ -213,7 +214,7 @@ static SDL_Surface *surf;
  * things (devices, save / load, the stick matrix) are in overlays opened from MASTER. */
 enum { COL_TONE, COL_MOD, COL_DELAY, COL_VERB, COL_MASTER, NCOL };
 enum { R_ALGO, R_K1, R_K2, R_K3, R_K4, R_D1, R_D2, R_D3, R_D4, R_MIX, NPROW };
-enum { MR_IN, MR_OUT, MR_DRY, MR_TEMPO, MR_ORDER, MR_SLOT, MR_SETUP, MR_STICKS, NMROW };
+enum { MR_IN, MR_OUT, MR_DRY, MR_TEMPO, MR_ORDER, MR_ROUTE, MR_SLOT, MR_SETUP, MR_STICKS, NMROW };
 enum { OV_NONE, OV_SETUP, OV_STICKS, OV_DEEP };
 enum { SR_INPUT, SR_INPAIR, SR_OUTPUT, SR_OUTPAIR, SR_BUFFER, SR_LATENCY, SR_SAVE, SR_LOAD, SR_FACTORY, SR_MIDI, SR_MIDIMAP, SR_CLOCK, SR_UPDATE, SR_LOG, SR_INIT, NSROW };
 #define NXROW (3 + NAX * 2 * 2)
@@ -545,6 +546,7 @@ static void adjust(int dir, int big)
         case MR_DRY: base.dry = clampf(base.dry + dir * step, 0.f, 1.f); break;
         case MR_TEMPO: base.bpm = clampf(roundf(base.bpm + dir * (big ? 5.f : 1.f)), 40.f, 240.f); break;
         case MR_ORDER: base.order = (base.order + dir + NORDER) % NORDER; break;
+        case MR_ROUTE: base.route = (base.route + dir + NROUTE) % NROUTE; break;
         case MR_SLOT: load_factory_or_slot(dir); return;
         default: return;
         }
@@ -1523,7 +1525,7 @@ static void pedal(int x, int m, int pass)
         mi->fmt(a, k, live.m[m].p[a][k], &live, v, sizeof v);
         snprintf(b, sizeof b, "%s %s", mi->pname[a][k], v);
     } else if (focused && s == R_MIX)
-        snprintf(b, sizeof b, ms->mix >= 0.999f ? "MIX ALL WET" : "MIX %.0f%%", live.m[m].mix * 100.f);
+        snprintf(b, sizeof b, "MIX %.0f%%  LEVEL", live.m[m].mix * 100.f);
     else if (focused && s == R_ALGO)
         snprintf(b, sizeof b, "%d/%d %s  A:DEEP", a + 1, mi->nalgo, mi->algo[a]);
     else
@@ -1581,7 +1583,7 @@ static void master_strip(int x, int w, int pass)
     }
     int ry0 = y + 86;
     for (int r = 0; r < NMROW && !pass; r++) {
-        int ry = ry0 + r * 29, here = focused && sel[COL_MASTER] == r;
+        int ry = ry0 + r * 26, here = focused && sel[COL_MASTER] == r;
         char lab[24], v[48];
         switch (r) {
         case MR_IN: snprintf(lab, sizeof lab, "IN"); snprintf(v, sizeof v, "%+.1f", base.in_db); break;
@@ -1589,16 +1591,17 @@ static void master_strip(int x, int w, int pass)
         case MR_DRY: snprintf(lab, sizeof lab, "DRY"); snprintf(v, sizeof v, base.dry < 0.005f ? "OFF" : "%.0f%%", base.dry * 100.f); break;
         case MR_TEMPO: snprintf(lab, sizeof lab, "BPM"); snprintf(v, sizeof v, "%.0f", base.bpm); break;
         case MR_ORDER: snprintf(lab, sizeof lab, "ORDER"); snprintf(v, sizeof v, "%d", base.order + 1); break;
+        case MR_ROUTE: snprintf(lab, sizeof lab, "ROUTE"); snprintf(v, sizeof v, "%s", eng_route_name(base.route)); break;
         case MR_SLOT: snprintf(lab, sizeof lab, "PRESET"); snprintf(v, sizeof v, "%d", preset_slot + 1); break;
         case MR_SETUP: snprintf(lab, sizeof lab, "SETUP"); snprintf(v, sizeof v, ">"); break;
         default: snprintf(lab, sizeof lab, "STICKS"); snprintf(v, sizeof v, ">"); break;
         }
-        if (here) gfx_rect(x + 6, ry - 3, w - 12, 27, 2, ACCENT);
+        if (here) gfx_rect(x + 6, ry - 2, w - 12, 25, 2, ACCENT);
         stamp(x + 12, ry, lab, 0, 1);
         stamp(x + w - 12 - stamp_w(v, 0, 1), ry, v, 0, 1);
     }
     /* the preset's name on tape, and the chain's order */
-    int ny = ry0 + NMROW * 29 + 6;
+    int ny = ry0 + NMROW * 26 + 8; /* (rows 26 apart: nine fit where eight at 29 did) */
     char nm[48];
     int tyy = ny + 108;
     if (!pass) {
@@ -1925,7 +1928,7 @@ static uint64_t box_hash(int k, int m)
             for (int t = 0; t < 2; t++) h = hmix(h, matrix[ax][t].mod * 64 + matrix[ax][t].param), h = hmix(h, q(matrix[ax][t].depth));
     } else {
         h = hmix(h, sel[COL_MASTER]), h = hmix(h, q(base.in_db)), h = hmix(h, q(base.out_db)), h = hmix(h, q(base.dry)), h = hmix(h, q(base.bpm));
-        h = hmix(h, base.order), h = hmix(h, preset_slot), h = hmix(h, stick_latch), h = hmix(h, hold_on), h = hmix(h, base.m[focus_mod].algo);
+        h = hmix(h, base.order), h = hmix(h, base.route), h = hmix(h, preset_slot), h = hmix(h, stick_latch), h = hmix(h, hold_on), h = hmix(h, base.m[focus_mod].algo);
         for (const char *c = patch_name; *c; c++) h = hmix(h, *c);
     }
     return h | 1; /* never 0: 0 is "not drawn yet" */

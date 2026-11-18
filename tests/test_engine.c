@@ -4,7 +4,8 @@
  *   - the output stays finite and below full scale (no blow-ups)
  *   - silence in gives silence out once the tail has gone (except FREEZE)
  *   - each algorithm makes sound (its wet path is alive at full wet)
- *   - mix 100 % has no dry: a module at full wet does not pass the input
+ *   - no module has a dry: at any MIX, in SERIES and in SEND, only its wet goes on
+ *   - MASTER > DRY lines up with the chain (no comb filter); a ROUTE change doesn't click
  *   - FREEZE holds the reverb's and the delay's tail
  *   - the cost per second of audio (for the A53, divide the margin by ~6)
  * `test_engine -w dir` also writes a WAV of each algorithm for listening. */
@@ -290,6 +291,85 @@ int main(int argc, char **argv)
         float z[2 * 4800] = {0};
         engine_process(e, &p, z, out, 4800);
         CHECK(rms(out + 2 * 2400, 2400) > 0.003f, "trails after bypass");
+    }
+
+    /* no dry at any MIX, in either ROUTE: a delay at half its level, long time, is silent at first */
+    for (int route = 0; route < NROUTE; route++) {
+        Patch p;
+        patch_default(&p);
+        p.route = route;
+        for (int k = 0; k < NMOD; k++) p.m[k].bypass = k != M_DELAY;
+        p.m[M_DELAY].algo = DL_TAPE;
+        p.m[M_DELAY].mix = 0.5f;
+        p.m[M_DELAY].p[DL_TAPE][0] = 1.f;
+        p.m[M_DELAY].p[DL_TAPE][2] = 0.f;
+        engine_reset(e);
+        engine_process(e, &p, in, out, SR / 4);
+        CHECK(rms(out, SR / 4) < 1e-4f, "%s, MIX 50 %%: no dry (rms %.6f)", eng_route_name(route), rms(out, SR / 4));
+        /* and with MOD on in front of it (SEND: the signal from TONE passes MOD and DELAY, and is taken away at the end) */
+        p.m[M_MOD].bypass = 0;
+        p.m[M_MOD].mix = 0.f; /* MOD at level 0: SERIES is then silent, SEND still only the delay's (none yet) */
+        engine_reset(e);
+        engine_process(e, &p, in, out, SR / 4);
+        CHECK(rms(out, SR / 4) < 1e-5f, "%s, MOD at 0 then DELAY: no dry (rms %.7f)", eng_route_name(route), rms(out, SR / 4));
+    }
+    /* SEND: the signal from TONE is taken away exactly, MOD on at unity: the output is MOD's wet only.
+     * The same patch in SERIES gives MOD's wet only too (DELAY and REVERB bypassed): the two match */
+    {
+        float *o2 = malloc(sizeof(float) * 2 * SR);
+        Patch p;
+        patch_default(&p);
+        for (int k = 0; k < NMOD; k++) p.m[k].bypass = k != M_MOD;
+        p.route = ROUTE_SERIES;
+        engine_reset(e);
+        engine_process(e, &p, in, out, SR);
+        p.route = ROUTE_SEND;
+        engine_reset(e);
+        engine_process(e, &p, in, o2, SR);
+        for (int i = 0; i < 2 * SR; i++) o2[i] -= out[i];
+        CHECK(rms(o2, SR) < 1e-5f * (rms(out, SR) + 1e-9f) * 100.f, "SEND takes the dry away exactly (left over %.2e of %.2e)", rms(o2, SR), rms(out, SR));
+        free(o2);
+    }
+    /* MASTER > DRY lines up with the chain: everything bypassed, DRY at full, the output is twice
+     * the input (a quiet input: the soft clip is straight there), not a comb filter */
+    {
+        Patch p;
+        patch_default(&p);
+        for (int k = 0; k < NMOD; k++) p.m[k].bypass = 1;
+        p.dry = 1.f;
+        float *q = malloc(sizeof(float) * 2 * SR), *d = malloc(sizeof(float) * 2 * SR);
+        for (int i = 0; i < 2 * SR; i++) q[i] = in[i] * 0.03f;
+        engine_reset(e);
+        engine_process(e, &p, q, out, SR);
+        int lat = 0;
+        float best = 1e9f;
+        for (int L = 0; L < 128; L++) {
+            for (int i = 0; i < 2 * SR; i++) d[i] = out[i] - (i >= 2 * L ? 2.f * q[i - 2 * L] : 0.f);
+            float r = rms(d + 2 * 256, SR - 256);
+            if (r < best) best = r, lat = L;
+        }
+        CHECK(best < 1e-3f * rms(out + 2 * 256, SR - 256), "MASTER > DRY lines up with the chain (%d frames late, left over %.2e)", lat, best);
+        free(q); free(d);
+    }
+    /* a ROUTE change while it sounds: no step bigger than the sound's own */
+    {
+        Patch p;
+        patch_default(&p);
+        p.m[M_TONE].bypass = p.m[M_MOD].bypass = 1; /* DELAY into REVERB: smooth in both ROUTEs */
+        float *q = malloc(sizeof(float) * 2 * 2 * SR);
+        for (int i = 0; i < 2 * SR; i++) q[2 * i] = q[2 * i + 1] = 0.3f * sinf(6.2831853f * 110.f * (float)i / SR);
+        engine_reset(e);
+        engine_process(e, &p, q, out, SR);
+        p.route = ROUTE_SEND;
+        engine_process(e, &p, q + 2 * SR, out + 2 * SR, SR);
+        float before = 0.f, at = 0.f, after = 0.f;
+        for (int i = SR / 2; i < 2 * SR; i++) {
+            float st = fabsf(out[2 * i] - out[2 * (i - 1)]);
+            float *w = i < SR ? &before : i < SR + SR / 20 ? &at : i > SR + SR / 2 ? &after : NULL;
+            if (w && st > *w) *w = st;
+        }
+        CHECK(at < 1.2f * fmaxf(before, after) + 1e-3f, "ROUTE change: no click (step %.4f; SERIES %.4f, SEND %.4f)", at, before, after);
+        free(q);
     }
 
     printf("\n%d checks, %d failed. Engine cost: %.1f%% of one host core on average, worst %.1f%% (%s)\n", checks,
