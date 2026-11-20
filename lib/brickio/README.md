@@ -17,6 +17,7 @@ will be chosen from a Brick's logs. The two tests below are brickio's, with thei
 | `duplex.c/h` | full duplex on one USB interface: capture and playback through ALSA (libasound, loaded at run time), linked, one real-time thread, no cushion |
 | `aring.c/h` | the input's ring between the capture and playback callbacks: a cushion, clock drift followed by resampling, channel pairs |
 | `midi.c/h` | USB MIDI in (a reader thread, the app woken at once) and out |
+| `mclock.c/h`, `mclockio.c/h` | the musical clock (MIDI clock and the Brick link, in and out, phase held) and its wiring to the MIDI ports and the link: not built by TrimFX yet; a better clock follow than its four-beat average, for when it moves onto it |
 | `tests/test_aring.c` | the ring against jitter, bursts, drift (also two devices), stalls, multichannel and mono |
 | `tests/test_duplex.c` | duplex.c against ALSA's null device: opens, runs, stops, starts again (skipped without libasound) |
 
